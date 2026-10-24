@@ -1,0 +1,278 @@
+-- Run from the repository root with psql --single-transaction and ON_ERROR_STOP.
+-- The CSVs here are the provided compact export and are loaded using PostgreSQL COPY.
+
+\set ON_ERROR_STOP on
+SET ROLE postgres;
+SET statement_timeout = 0;
+
+\i updated_db/postgres_schema.sql
+
+\copy skindecode_catalog.catalog_brands (id,name) FROM 'C:/Users/yyash/Coding/SkinDecode_app/updated_db/csv/catalog_brands.csv' WITH (FORMAT csv, HEADER true, ENCODING 'UTF8')
+\copy skindecode_catalog.catalog_products (id,brand_id,name,category,subcategory,image_url,description) FROM 'C:/Users/yyash/Coding/SkinDecode_app/updated_db/csv/catalog_products.csv' WITH (FORMAT csv, HEADER true, ENCODING 'UTF8')
+\copy skindecode_catalog.catalog_ingredients (id,name,inci_name,inn_name,ph_eur_name,description,functions_json,prevalence_label,prevalence_percent,common_categories_json,typical_list_position) FROM 'C:/Users/yyash/Coding/SkinDecode_app/updated_db/csv/catalog_ingredients.csv' WITH (FORMAT csv, HEADER true, ENCODING 'UTF8')
+\copy skindecode_catalog.catalog_attributes (id,key,label,description) FROM 'C:/Users/yyash/Coding/SkinDecode_app/updated_db/csv/catalog_attributes.csv' WITH (FORMAT csv, HEADER true, ENCODING 'UTF8')
+\copy skindecode_catalog.catalog_analysis_states (id,key) FROM 'C:/Users/yyash/Coding/SkinDecode_app/updated_db/csv/catalog_analysis_states.csv' WITH (FORMAT csv, HEADER true, ENCODING 'UTF8')
+\copy skindecode_catalog.catalog_flags (id,key,label) FROM 'C:/Users/yyash/Coding/SkinDecode_app/updated_db/csv/catalog_flags.csv' WITH (FORMAT csv, HEADER true, ENCODING 'UTF8')
+\copy skindecode_catalog.catalog_formulas (id,product_id,region,formulation,variant,image_url,ingredient_ids_json,flag_ids_json,analysis_json) FROM 'C:/Users/yyash/Coding/SkinDecode_app/updated_db/csv/catalog_formulas.csv' WITH (FORMAT csv, HEADER true, ENCODING 'UTF8')
+\copy skindecode_catalog.catalog_ingredient_aliases (ingredient_id,alias,normalized_alias) FROM 'C:/Users/yyash/Coding/SkinDecode_app/updated_db/csv/catalog_ingredient_aliases.csv' WITH (FORMAT csv, HEADER true, ENCODING 'UTF8')
+\copy skindecode_catalog.catalog_ingredient_attributes (ingredient_id,attribute_id) FROM 'C:/Users/yyash/Coding/SkinDecode_app/updated_db/csv/catalog_ingredient_attributes.csv' WITH (FORMAT csv, HEADER true, ENCODING 'UTF8')
+\copy skindecode_catalog.catalog_ingredient_references (id,ingredient_id,url,domain,label) FROM 'C:/Users/yyash/Coding/SkinDecode_app/updated_db/csv/catalog_ingredient_references.csv' WITH (FORMAT csv, HEADER true, ENCODING 'UTF8')
+
+-- Build lookup indexes and validate foreign keys after the bulk load.
+ALTER TABLE skindecode_catalog.catalog_products
+    ADD CONSTRAINT catalog_products_brand_id_fkey
+    FOREIGN KEY (brand_id) REFERENCES skindecode_catalog.catalog_brands(id);
+ALTER TABLE skindecode_catalog.catalog_formulas
+    ADD CONSTRAINT catalog_formulas_product_id_fkey
+    FOREIGN KEY (product_id) REFERENCES skindecode_catalog.catalog_products(id);
+ALTER TABLE skindecode_catalog.catalog_ingredient_aliases
+    ADD CONSTRAINT catalog_ingredient_aliases_ingredient_id_fkey
+    FOREIGN KEY (ingredient_id) REFERENCES skindecode_catalog.catalog_ingredients(id);
+ALTER TABLE skindecode_catalog.catalog_ingredient_attributes
+    ADD CONSTRAINT catalog_ingredient_attributes_ingredient_id_fkey
+    FOREIGN KEY (ingredient_id) REFERENCES skindecode_catalog.catalog_ingredients(id);
+ALTER TABLE skindecode_catalog.catalog_ingredient_attributes
+    ADD CONSTRAINT catalog_ingredient_attributes_attribute_id_fkey
+    FOREIGN KEY (attribute_id) REFERENCES skindecode_catalog.catalog_attributes(id);
+ALTER TABLE skindecode_catalog.catalog_ingredient_references
+    ADD CONSTRAINT catalog_ingredient_references_ingredient_id_fkey
+    FOREIGN KEY (ingredient_id) REFERENCES skindecode_catalog.catalog_ingredients(id);
+
+CREATE INDEX catalog_products_brand_idx
+    ON skindecode_catalog.catalog_products(brand_id);
+CREATE INDEX catalog_products_name_idx
+    ON skindecode_catalog.catalog_products(name);
+CREATE INDEX catalog_products_category_idx
+    ON skindecode_catalog.catalog_products(category);
+CREATE INDEX catalog_brands_name_idx
+    ON skindecode_catalog.catalog_brands(name);
+CREATE INDEX catalog_formulas_product_idx
+    ON skindecode_catalog.catalog_formulas(product_id);
+CREATE INDEX catalog_aliases_ingredient_idx
+    ON skindecode_catalog.catalog_ingredient_aliases(ingredient_id);
+CREATE INDEX catalog_aliases_normalized_idx
+    ON skindecode_catalog.catalog_ingredient_aliases(normalized_alias);
+CREATE INDEX catalog_ingredient_attributes_attribute_idx
+    ON skindecode_catalog.catalog_ingredient_attributes(attribute_id);
+CREATE INDEX catalog_ingredient_references_ingredient_idx
+    ON skindecode_catalog.catalog_ingredient_references(ingredient_id);
+
+-- Validate the compact import before touching the old catalog objects.
+DO $verify_compact$
+BEGIN
+    IF (SELECT count(*) FROM skindecode_catalog.catalog_brands) <> 10932
+       OR (SELECT count(*) FROM skindecode_catalog.catalog_products) <> 52525
+       OR (SELECT count(*) FROM skindecode_catalog.catalog_formulas) <> 54979
+       OR (SELECT count(*) FROM skindecode_catalog.catalog_ingredients) <> 34288
+       OR (SELECT count(*) FROM skindecode_catalog.catalog_ingredient_aliases) <> 492
+       OR (SELECT count(*) FROM skindecode_catalog.catalog_attributes) <> 66
+       OR (SELECT count(*) FROM skindecode_catalog.catalog_ingredient_attributes) <> 21405
+       OR (SELECT count(*) FROM skindecode_catalog.catalog_flags) <> 12
+       OR (SELECT count(*) FROM skindecode_catalog.catalog_ingredient_references) <> 7815
+       OR (SELECT count(*) FROM skindecode_catalog.catalog_analysis_states) <> 5 THEN
+        RAISE EXCEPTION 'Compact catalog row counts do not match the verified source manifest';
+    END IF;
+
+    IF EXISTS (
+        SELECT 1
+        FROM skindecode_catalog.catalog_formulas f
+        CROSS JOIN LATERAL jsonb_array_elements(f.ingredient_ids_json::jsonb) AS ref(value)
+        LEFT JOIN skindecode_catalog.catalog_ingredients i
+          ON i.id = (ref.value #>> '{}')::integer
+        WHERE i.id IS NULL
+    ) OR EXISTS (
+        SELECT 1
+        FROM skindecode_catalog.catalog_formulas f
+        CROSS JOIN LATERAL jsonb_array_elements(f.flag_ids_json::jsonb) AS ref(value)
+        LEFT JOIN skindecode_catalog.catalog_flags x
+          ON x.id = (ref.value #>> '{}')::smallint
+        WHERE x.id IS NULL
+    ) OR EXISTS (
+        SELECT 1
+        FROM skindecode_catalog.catalog_formulas f
+        CROSS JOIN LATERAL jsonb_array_elements(f.analysis_json::jsonb) AS entry(value)
+        LEFT JOIN skindecode_catalog.catalog_attributes a
+          ON a.id = (entry.value ->> 0)::smallint
+        LEFT JOIN skindecode_catalog.catalog_analysis_states s
+          ON s.id = (entry.value ->> 1)::smallint
+        WHERE a.id IS NULL OR s.id IS NULL
+    ) OR EXISTS (
+        SELECT 1
+        FROM skindecode_catalog.catalog_formulas f
+        CROSS JOIN LATERAL jsonb_array_elements(f.analysis_json::jsonb) AS entry(value)
+        CROSS JOIN LATERAL jsonb_array_elements(entry.value -> 3) AS ref(value)
+        LEFT JOIN skindecode_catalog.catalog_ingredients i
+          ON i.id = (ref.value #>> '{}')::integer
+        WHERE i.id IS NULL
+    ) THEN
+        RAISE EXCEPTION 'Compact catalog payload contains invalid ingredient, flag, or analysis references';
+    END IF;
+END
+$verify_compact$;
+
+-- Prevent user-table writes during the short FK handoff and verify the data rows stay unchanged.
+LOCK TABLE public.user_profiles, public.routines, public.routine_steps, public.routine_logs, public.shelf_items
+    IN SHARE ROW EXCLUSIVE MODE;
+
+CREATE TEMP TABLE _protected_user_data (
+    phase text NOT NULL,
+    table_name text NOT NULL,
+    row_count bigint NOT NULL,
+    row_hash text NOT NULL,
+    PRIMARY KEY (phase, table_name)
+) ON COMMIT DROP;
+
+INSERT INTO _protected_user_data
+SELECT 'before', 'user_profiles', count(*), md5(coalesce(string_agg(to_jsonb(t)::text, E'\n' ORDER BY t.id), '')) FROM public.user_profiles t
+UNION ALL
+SELECT 'before', 'routines', count(*), md5(coalesce(string_agg(to_jsonb(t)::text, E'\n' ORDER BY t.id), '')) FROM public.routines t
+UNION ALL
+SELECT 'before', 'routine_steps', count(*), md5(coalesce(string_agg(to_jsonb(t)::text, E'\n' ORDER BY t.id), '')) FROM public.routine_steps t
+UNION ALL
+SELECT 'before', 'routine_logs', count(*), md5(coalesce(string_agg(to_jsonb(t)::text, E'\n' ORDER BY t.id), '')) FROM public.routine_logs t
+UNION ALL
+SELECT 'before', 'shelf_items', count(*), md5(coalesce(string_agg(to_jsonb(t)::text, E'\n' ORDER BY t.id), '')) FROM public.shelf_items t;
+
+DO $verify_legacy_refs$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM (
+            SELECT product_id FROM public.routine_steps WHERE product_id IS NOT NULL
+            UNION
+            SELECT product_id FROM public.shelf_items WHERE product_id IS NOT NULL
+        ) refs
+        LEFT JOIN skindecode_catalog.products old_product
+          ON old_product.product_id = refs.product_id
+        WHERE old_product.product_id IS NULL
+    ) THEN
+        RAISE EXCEPTION 'A user product reference does not resolve in the old product catalog';
+    END IF;
+
+    IF EXISTS (
+        SELECT 1
+        FROM public.shelf_items s
+        LEFT JOIN skindecode_catalog.catalog_products p ON p.id = s.product_id
+        WHERE p.id IS NULL
+    ) THEN
+        RAISE EXCEPTION 'Existing shelf items cannot safely reference the compact product catalog';
+    END IF;
+END
+$verify_legacy_refs$;
+
+-- Compact IDs can collide with old IDs but identify different products.
+-- Keep snapshots only for products already referenced by user-owned rows.
+CREATE TABLE skindecode_catalog.catalog_legacy_product_refs (
+    product_id bigint PRIMARY KEY,
+    product_snapshot jsonb NOT NULL
+);
+
+INSERT INTO skindecode_catalog.catalog_legacy_product_refs (product_id, product_snapshot)
+SELECT p.product_id, to_jsonb(p)
+FROM skindecode_catalog.products p
+WHERE p.product_id IN (
+    SELECT product_id FROM public.routine_steps WHERE product_id IS NOT NULL
+    UNION
+    SELECT product_id FROM public.shelf_items WHERE product_id IS NOT NULL
+);
+
+ALTER TABLE public.routine_steps
+    DROP CONSTRAINT routine_steps_product_id_fkey;
+ALTER TABLE public.routine_steps
+    ADD CONSTRAINT routine_steps_product_id_legacy_ref_fkey
+    FOREIGN KEY (product_id)
+    REFERENCES skindecode_catalog.catalog_legacy_product_refs(product_id)
+    ON DELETE SET NULL;
+
+ALTER TABLE public.shelf_items
+    DROP CONSTRAINT shelf_items_product_id_fkey;
+ALTER TABLE public.shelf_items
+    ADD CONSTRAINT shelf_items_product_id_fkey
+    FOREIGN KEY (product_id)
+    REFERENCES skindecode_catalog.catalog_products(id)
+    ON DELETE RESTRICT;
+
+-- Remove only the former catalog tables. Their attached indexes and constraints go with them.
+DROP TABLE skindecode_catalog.ingredient_name_map;
+DROP TABLE skindecode_catalog.product_ingredients;
+DROP TABLE skindecode_catalog.formula_versions;
+DROP TABLE skindecode_catalog.products;
+DROP TABLE skindecode_catalog.ingredients;
+DROP TABLE skindecode_catalog.brands;
+DROP TABLE skindecode_catalog.schema_migrations;
+
+REVOKE CREATE ON SCHEMA skindecode_catalog FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON ALL TABLES IN SCHEMA skindecode_catalog FROM PUBLIC, anon, authenticated;
+GRANT USAGE ON SCHEMA skindecode_catalog TO anon, authenticated;
+GRANT SELECT ON ALL TABLES IN SCHEMA skindecode_catalog TO anon, authenticated;
+ALTER DEFAULT PRIVILEGES IN SCHEMA skindecode_catalog
+    GRANT SELECT ON TABLES TO anon, authenticated;
+
+-- Expose catalog rows read-only through Supabase's API roles.
+DO $catalog_rls$
+DECLARE
+    table_name text;
+BEGIN
+    FOREACH table_name IN ARRAY ARRAY[
+        'catalog_brands', 'catalog_products', 'catalog_ingredients',
+        'catalog_ingredient_aliases', 'catalog_attributes',
+        'catalog_ingredient_attributes', 'catalog_flags',
+        'catalog_analysis_states', 'catalog_formulas',
+        'catalog_ingredient_references', 'catalog_legacy_product_refs'
+    ] LOOP
+        EXECUTE format('ALTER TABLE skindecode_catalog.%I ENABLE ROW LEVEL SECURITY', table_name);
+        EXECUTE format(
+            'CREATE POLICY catalog_read_access ON skindecode_catalog.%I FOR SELECT TO anon, authenticated USING (true)',
+            table_name
+        );
+    END LOOP;
+END
+$catalog_rls$;
+
+INSERT INTO _protected_user_data
+SELECT 'after', 'user_profiles', count(*), md5(coalesce(string_agg(to_jsonb(t)::text, E'\n' ORDER BY t.id), '')) FROM public.user_profiles t
+UNION ALL
+SELECT 'after', 'routines', count(*), md5(coalesce(string_agg(to_jsonb(t)::text, E'\n' ORDER BY t.id), '')) FROM public.routines t
+UNION ALL
+SELECT 'after', 'routine_steps', count(*), md5(coalesce(string_agg(to_jsonb(t)::text, E'\n' ORDER BY t.id), '')) FROM public.routine_steps t
+UNION ALL
+SELECT 'after', 'routine_logs', count(*), md5(coalesce(string_agg(to_jsonb(t)::text, E'\n' ORDER BY t.id), '')) FROM public.routine_logs t
+UNION ALL
+SELECT 'after', 'shelf_items', count(*), md5(coalesce(string_agg(to_jsonb(t)::text, E'\n' ORDER BY t.id), '')) FROM public.shelf_items t;
+
+DO $verify_user_data$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM _protected_user_data b
+        JOIN _protected_user_data a USING (table_name)
+        WHERE b.phase = 'before' AND a.phase = 'after'
+          AND (b.row_count <> a.row_count OR b.row_hash <> a.row_hash)
+    ) THEN
+        RAISE EXCEPTION 'A protected user table changed during catalog replacement';
+    END IF;
+END
+$verify_user_data$;
+
+ANALYZE skindecode_catalog.catalog_brands;
+ANALYZE skindecode_catalog.catalog_products;
+ANALYZE skindecode_catalog.catalog_ingredients;
+ANALYZE skindecode_catalog.catalog_formulas;
+ANALYZE skindecode_catalog.catalog_ingredient_aliases;
+ANALYZE skindecode_catalog.catalog_ingredient_attributes;
+ANALYZE skindecode_catalog.catalog_ingredient_references;
+
+NOTIFY pgrst, 'reload schema';
+
+SELECT 'brands' AS table_name, count(*) AS row_count FROM skindecode_catalog.catalog_brands
+UNION ALL SELECT 'products', count(*) FROM skindecode_catalog.catalog_products
+UNION ALL SELECT 'formulas', count(*) FROM skindecode_catalog.catalog_formulas
+UNION ALL SELECT 'ingredients', count(*) FROM skindecode_catalog.catalog_ingredients
+UNION ALL SELECT 'ingredient_aliases', count(*) FROM skindecode_catalog.catalog_ingredient_aliases
+UNION ALL SELECT 'attributes', count(*) FROM skindecode_catalog.catalog_attributes
+UNION ALL SELECT 'ingredient_attributes', count(*) FROM skindecode_catalog.catalog_ingredient_attributes
+UNION ALL SELECT 'flags', count(*) FROM skindecode_catalog.catalog_flags
+UNION ALL SELECT 'ingredient_references', count(*) FROM skindecode_catalog.catalog_ingredient_references
+UNION ALL SELECT 'analysis_states', count(*) FROM skindecode_catalog.catalog_analysis_states
+UNION ALL SELECT 'legacy_product_refs', count(*) FROM skindecode_catalog.catalog_legacy_product_refs
+ORDER BY table_name;

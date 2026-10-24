@@ -1,0 +1,5 @@
+{
+  "platforms": ["apple", "android"],
+  "apple": { "modules": ["SkinDecodeAlarmModule"] },
+  "android": { "modules": ["expo.modules.skindecodealarm.SkinDecodeAlarmModule"] }
+}

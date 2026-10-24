@@ -1,0 +1,86 @@
+{
+  "expo": {
+    "name": "SkinDecode",
+    "slug": "skindecode-app",
+    "scheme": "skindecode",
+    "version": "1.0.0",
+    "platforms": [
+      "ios",
+      "android"
+    ],
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "newArchEnabled": true,
+    "plugins": [
+      "expo-router",
+      [
+        "expo-splash-screen",
+        {
+          "image": "./src/assets/login/logo.png",
+          "imageWidth": 150,
+          "resizeMode": "contain",
+          "backgroundColor": "#FAF6EE",
+          "dark": {
+            "image": "./src/assets/login/logo.png",
+            "backgroundColor": "#FAF6EE"
+          }
+        }
+      ],
+      [
+        "expo-secure-store",
+        {
+          "configureAndroidBackup": true
+        }
+      ],
+      [
+        "expo-location",
+        {
+          "locationWhenInUsePermission": "Allow SkinDecode to use your location only while the app is open to show local UV and weather."
+        }
+      ],
+      [
+        "react-native-nitro-google-signin",
+        {
+          "iosUrlScheme": "com.googleusercontent.apps.REPLACE_WITH_IOS_CLIENT_ID"
+        }
+      ]
+    ],
+    "experiments": {
+      "typedRoutes": true
+    },
+    "icon": "./assets/skindecode-app-icon-padded.png",
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.skindecode.app",
+      "infoPlist": {
+        "NSCameraUsageDescription": "SkinDecode uses the front camera for an on-device daily skin check. Photos stay on this device.",
+        "NSAlarmKitUsageDescription": "SkinDecode uses system alarms for the water reminder schedule you choose."
+      }
+    },
+    "android": {
+      "package": "com.skindecode.app",
+      "permissions": [
+        "android.permission.CAMERA",
+        "android.permission.SCHEDULE_EXACT_ALARM",
+        "android.permission.USE_FULL_SCREEN_INTENT",
+        "android.permission.RECEIVE_BOOT_COMPLETED"
+      ],
+      "blockedPermissions": [
+        "android.permission.SYSTEM_ALERT_WINDOW",
+        "android.permission.READ_EXTERNAL_STORAGE",
+        "android.permission.WRITE_EXTERNAL_STORAGE"
+      ],
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/skindecode-app-icon-padded.png",
+        "backgroundColor": "#FAF6EE"
+      }
+    },
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "b36b81d8-7608-4704-980f-11cdea2f8d58"
+      }
+    },
+    "owner": "yashpunmiya"
+  }
+}

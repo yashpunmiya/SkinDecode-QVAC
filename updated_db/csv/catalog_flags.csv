@@ -1,0 +1,13 @@
+id,key,label
+1,alcohol_free,Alcohol-free
+2,cruelty_free,Cruelty-free
+3,eu_allergen_free,EU-allergen-free
+4,fragrance_free,Fragrance-free
+5,fungal_acne_safe,Fungal-acne-safe
+6,oil_free,Oil-free
+7,paraben_free,Paraben-free
+8,pore_clogger_free,Pore-clogger-free
+9,reef_safe,Reef-safe
+10,silicone_free,Silicone-free
+11,sulfate_free,Sulfate-free
+12,vegan,Vegan

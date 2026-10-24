@@ -1,0 +1,18 @@
+apply plugin: 'com.android.library'
+apply plugin: 'expo-module-gradle-plugin'
+
+group = 'com.skindecode.alarm'
+version = '1.0.0'
+
+android {
+  namespace "expo.modules.skindecodealarm"
+  defaultConfig {
+    minSdkVersion 24
+    versionCode 1
+    versionName "1.0.0"
+  }
+}
+
+dependencies {
+  implementation 'androidx.core:core:1.15.0'
+}

@@ -1,0 +1,6 @@
+id,key
+0,unknown
+1,resolved_endpoint
+2,unresolved_count_mismatch
+3,unresolved_lazy
+4,unresolved_mapping_mismatch

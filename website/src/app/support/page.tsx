@@ -1,0 +1,8 @@
+import type { Metadata } from 'next';
+import Link from 'next/link';
+import { Breadcrumb, ContactState, Footer, Header } from '@/components/site';
+import { metadataForPage, pageMetadata } from '@/lib/site';
+
+export const metadata: Metadata = metadataForPage('/support', pageMetadata.support.title, pageMetadata.support.description);
+
+export default function SupportPage(){return <><Header/><main id="main-content"><div className="page-hero"><Breadcrumb items={[{name:'Home',href:'/'},{name:'Support'}]}/><span className="eyebrow">We’re here to help</span><h1>Let’s make it a little clearer.</h1><p>Find an answer or contact SkinDecode about sign-in, product information, routines, privacy, or account access.</p></div><section className="section section--compact"><div className="section__inner two-col"><div className="copy-block"><h2>Start with the FAQ</h2><p>We’ve answered common questions about product details, routine syncing, private photos, reminders, UV, and Skin AI.</p><Link className="button button--dark" href="/faq" style={{marginTop:18}}>Browse answers</Link></div><div className="copy-block"><h2>Contact support</h2><p>A support address must be verified and configured before this page can receive email requests.</p><div style={{marginTop:18}}><ContactState/></div></div></div></section><section className="section section--sage section--compact"><div className="section__inner"><div className="launch-blockers"><h3>Account deletion</h3><p>Delete your account from Profile → Delete account in the app or use the <Link href="/delete-account">secure account deletion page</Link>.</p></div></div></section></main><Footer/></>}

@@ -1,0 +1,7 @@
+{
+  "name": "@skindecode/device-alarm",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Native system alarms for SkinDecode",
+  "main": "src/index.ts"
+}
