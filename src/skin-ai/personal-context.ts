@@ -7,6 +7,7 @@ import { getProductDetail, getSkinProfile } from '../products/catalog-service';
 import { scoreProductMatch } from '../products/product-intelligence';
 import { getCachedSkinAIContext } from './storage';
 import { buildInvestigatorFacts } from './investigator';
+import { asksProductComparison } from './product-comparison.ts';
 import type { SkinAIContextAttachment } from './types';
 import type { ProductDetail, ProductSummary, SkinProfile } from '../products/types';
 
@@ -38,14 +39,13 @@ function wantsCatalog(question: string) {
 }
 
 function wantsRoutine(question: string) {
-	// A generic product/ingredient question should not silently pull in the active
-	// routine. That unrelated context dilutes small on-device models and can make
-	// their citations appear to refer to the wrong product.
-	return /\b(routine|used|using|use|skipped|skip|completed|consistent|overlap|tonight|morning|evening|shelf)\b/i.test(question);
+	// Keep product explainers focused. Routine records are included when asked
+	// about a routine, use history, schedule, or a shelf interaction.
+	return /\b(routine|used|using|skipped|skip|completed|consistent|overlap|tonight|morning|evening|shelf)\b/i.test(question);
 }
 
 function wantsSkinChecks(question: string) {
-  return /\b(skin|redness|irritation|irritated|dry|dryness|acne|breakout|oiliness|rating|check|trend|worse|better|journey)\b/i.test(question) || /yesterday.*today|today.*yesterday/i.test(question);
+  return /\b(today|yesterday|last week|last month|ratings?|check-?in|trend|worse|better|changed|change|feel|feeling|increased?|decreased?|journey)\b/i.test(question) || /yesterday.*today|today.*yesterday/i.test(question);
 }
 
 const selectedFormulaFreshness = new Map<number, { product: ProductDetail | null; loadedAt: number }>();
@@ -58,7 +58,7 @@ async function getFreshSelectedFormula(productId: number): Promise<ProductDetail
   return product;
 }
 
-/** Gathers only local SQLite/cache data. It never calls Supabase or a network API. */
+/** Reads account-scoped local data first; online services are fallback sources for uncached profile/formula records. */
 export async function loadPersonalSkinContext(
   userId: string,
   question: string,
@@ -66,7 +66,7 @@ export async function loadPersonalSkinContext(
   now = new Date(),
 ): Promise<Record<string, unknown>> {
   const hasSelectedPersonalContext = selectedAttachments.some((item) => ['skin-profile', 'routine', 'skin-check', 'shelf', 'product', 'product-evidence'].includes(item.type));
-  const comparisonQuestion = /\b(compare|comparison|versus|vs\.?|which one|which should|choose between|difference)\b/i.test(question);
+  const comparisonQuestion = asksProductComparison(question);
   const needsCatalog = wantsCatalog(question) || (comparisonQuestion && hasSelectedPersonalContext);
   const personal = wantsPersonalSkin(question) || hasSelectedPersonalContext;
   if (!personal && !needsCatalog) return {};
@@ -158,7 +158,8 @@ export async function loadPersonalSkinContext(
   const attachedEvidenceIds = comparisonQuestion && attachedShelfIds.length && attachedRoutineIds.length
     ? [...attachedRoutineIds.slice(0, 2), ...attachedShelfIds.slice(0, 2)]
     : attachedRoutineIds.length ? attachedRoutineIds : attachedShelfIds;
-  const productIds = [...new Set([...selectedProductIds, ...attachedEvidenceIds, ...inventoryIds])].slice(0, 4);
+  const productLimit = hasRoutineOrShelfContext && (needsRoutine || comparisonQuestion) ? 8 : 4;
+  const productIds = [...new Set([...selectedProductIds, ...attachedEvidenceIds, ...inventoryIds])].slice(0, productLimit);
   const [cachedDetails, summaries] = await Promise.all([
     getCachedProductDetailsByIds(productIds).catch(() => new Map<number, ProductDetail>()),
     getCachedProductsByIds(productIds).catch(() => new Map<number, ProductSummary>()),

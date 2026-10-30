@@ -1,5 +1,5 @@
 import { buildAIRequest } from './context-builder';
-import { buildProductComparison, isGroundedProductComparisonResponse, routineShelfComparisonLimitation } from './product-comparison';
+import { buildProductComparison, isGroundedProductComparisonResponse, productComparisonResponseRejectionReason, routineShelfComparisonLimitation } from './product-comparison';
 import { buildCapabilityGuardAnswer } from './response-guard';
 import { buildProductSuitabilityModelRequest, isGroundedProductSuitabilityResponse, productSuitabilityResponseRejectionReason } from './product-analysis';
 import { createSkinAIProvider, skinAIRuntimeConfig } from './provider';
@@ -7,19 +7,28 @@ import type { SkinAIContextAttachment, SkinAIMessage } from './types';
 
 const provider = createSkinAIProvider();
 function comparisonModelRequest(request: ReturnType<typeof buildAIRequest>, comparison: string) {
+  // Comparisons already have a compact, grounded product summary. Do not send
+  // the full routine, shelf and six-product cache again beside it: that
+  // duplicates evidence and pushes the two products/question out of 1B's window.
+  const context = {
+    ...(request.context.product ? { product: request.context.product } : {}),
+    ...(request.context['skin-profile'] ? { 'skin-profile': request.context['skin-profile'] } : {}),
+    ...(Array.isArray(request.context.catalogEvidence) ? { catalogEvidence: request.context.catalogEvidence.slice(0, 2) } : {}),
+    focusedProductAnalysis: true,
+  };
   return {
     ...request,
-    systemPrompt: `You are SkinDecode's on-device product analyst. Compare only the exact named products and facts in the private notes. Explain one practical trade-off using supplied formula findings and app-calculated Skin Match signals; do not repeat the full inventory. Name both products exactly as shown. If formula details or match scores are missing, say that the records do not support an ingredient-level or personalized comparison. Never invent product codes, product roles, ingredients, ingredient counts, concentrations, percentages, or efficacy claims. Do not suggest replacements or routine changes. Do not pick a personalized winner unless the supplied scores support it. Keep the answer to 2–4 concise sentences and cite only supplied references. Comparison evidence: ${comparison}`,
+    systemPrompt: `You are SkinDecode's on-device product analyst. Answer the user's comparison directly in 2–3 short sentences. Name both products, explain one useful difference from the supplied formula signals or app match scores, then say what that difference does and does not establish. Never add ingredients, concentrations, percentages, efficacy claims or a winner unsupported by these notes. Do not recommend a replacement or routine change. Evidence: ${comparison}`,
     history: [],
-    context: { ...request.context, focusedProductAnalysis: true },
+    context,
   };
 }
 
 async function answerProductComparison(request: ReturnType<typeof buildAIRequest>, comparison: string, signal?: AbortSignal) {
   const result = await provider.respond(comparisonModelRequest(request, comparison), { signal });
-  return isGroundedProductComparisonResponse(result.text, request)
-    ? result
-    : { text: 'I couldn’t produce a reliable comparison from the saved product evidence, so I’ve left out unsupported details. Try comparing two products at a time or ask about one specific formula signal.' };
+  if (isGroundedProductComparisonResponse(result.text, request)) return result;
+  console.warn('[Skin AI] Product comparison response rejected:', productComparisonResponseRejectionReason(result.text, request));
+  return { text: 'I couldn’t produce a reliable comparison from the saved product evidence, so I’ve left out unsupported details. Try comparing two products at a time or ask about one specific formula signal.' };
 }
 
 async function answerProductSuitability(request: ReturnType<typeof buildAIRequest>, signal?: AbortSignal): Promise<string | null> {

@@ -23,6 +23,21 @@ test('product suitability uses a synthesis rubric grounded in calculated app sig
   assert.match(instructions,/connect the strongest supplied positive and caution signals/);
 });
 
+test('routine suitability questions use routine evidence instead of a generic Skin Match explainer', () => {
+  const instructions = buildEvidenceSynthesisInstructions(
+    'Check my routine and see what ingredients or products do not suit my skin type',
+    {
+      routine: { steps: [{ name: 'Barrier Face Wash', period: 'am' }] },
+      'skin-profile': { skinType: 'combination', sensitivity: 'high' },
+      'local-product-cache': [{ name: 'Barrier Face Wash', formulaFindings: [{ kind: 'concern', label: 'Potential irritation', ingredients: ['Fragrance'] }] }],
+    },
+  );
+  assert.match(instructions, /Analyze the routine products, not SkinDecode as an app/);
+  assert.match(instructions, /Name each relevant product exactly as supplied/);
+  assert.doesNotMatch(instructions, /Explain what the app-calculated Skin Match score/);
+  assert.match(instructions, /Do not explain the Skin Match scoring system/);
+});
+
 test('product synthesis explicitly states limits and rejects unsupported alternatives', () => {
   const instructions=buildEvidenceSynthesisInstructions('Is it suitable for me?',{product:{name:'Unknown cream',formulaAvailable:false}});
   assert.match(instructions,/If no calculated score exists/);

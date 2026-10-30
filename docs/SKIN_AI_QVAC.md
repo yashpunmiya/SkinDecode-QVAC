@@ -1,55 +1,47 @@
 # Skin AI and QVAC
 
-## Architecture and data sources
+## How chat works
 
-The existing chat screen, SQLite chat history, manual context picker, and provider/request-builder layers remain in use. `src/skin-ai/qvac-runtime.ts` owns model download/load/unload. `src/skin-ai/provider.ts` streams text from QVAC. `src/skin-ai/personal-context.ts` retrieves relevant records from local SQLite/cache databases and does not call Supabase or a remote AI endpoint. `src/skin-ai/investigator.ts` calculates trend and timeline facts in TypeScript before generation.
+The Skin AI screen is `app/(app)/(tabs)/skin-ai.tsx`. It writes user and assistant messages to account-scoped local SQLite through `src/skin-ai/storage.ts`, streams the response into the existing chat bubble, and keeps selected attachment labels with the conversation.
 
-Existing SkinDecode stores remain authoritative: skin checks in the local daily-skin-check database, AM/PM routines and recorded outcomes in the routine database, water records in the water database, product/ingredient details and shelf entries in the product cache, and chat messages in local Skin AI storage. Skin profile data is cached per user when the existing profile service successfully reads it. Account deletion removes the per-user profile cache. Missing water/check/routine records are stated as missing; they are not converted to zero or assumed usage.
+`src/skin-ai/personal-context.ts` loads only the data relevant to a question. It reads cached profile, routine, check-in, water, shelf, and product/formula records first. If an explicitly needed profile or selected formula is missing locally, the existing profile/catalog service can query its Supabase-backed source and cache the result. There is no hosted AI inference endpoint. In airplane mode, cached data and the downloaded model are available; uncached account/catalog records cannot be fetched.
 
-Catalog retrieval is bounded lexical retrieval over product/formula and ingredient details already cached on the device. It does not download or package the large production CSV database, and it does not use embeddings/vector search. Cached references are included where the catalog supplied them. A missing local product or ingredient entry is reported as unavailable. General skincare explanations from model weights remain model-generated and are not represented as sourced catalog claims.
-
-The app retrieves profile/routine/check/water context and catalog details only when the question appears to need them. Context and recent chat history are bounded for the model window. The LLM explains deterministic measurements and must not present timing as proof of causation. Product comparisons continue to use the existing deterministic app scores and actual formula evidence where available.
+`src/skin-ai/context-builder.ts` combines selected attachment facts, retrieved local facts, and recent user/assistant turns into a `SkinAIRequest`. `src/skin-ai/chat-service.ts` routes grounded product suitability and comparisons through QVAC with the selected product formulas and app-calculated Skin Match evidence, and sends ordinary questions through the same on-device provider. `src/skin-ai/provider.ts` converts records into readable private notes, fits relevant notes to the model context window, and streams QVAC output. The provider records a warning when the window requires omitting less relevant notes. The model must not infer missing personal data, product ingredients, photo observations, or cause and effect.
 
 ## Model and native setup
 
-- QVAC Expo SDK: `@qvac/sdk` **0.22.0**. Native QVAC Fabric packages are pinned to **0.22.0** in `package.json` and `package-lock.json`.
-- Text model: `LLAMA_3_2_1B_INST_Q4_0` (`Llama-3.2-1B-Instruct-Q4_0.gguf`), shown in the UI as **Llama 3.2 1B Instruct Q4_0**. The installed QVAC model registry reports 773,025,824 bytes (about 737 MiB), Q4_0 quantization. Selection is in `src/skin-ai/model-config.ts`.
-- Model context: 2,048 tokens; CPU backend; `modelFitPolicy: 'refuse'` rejects an incompatible fit instead of forcing it.
-- Android minimum SDK: 29, configured with `expo-build-properties` in `app.json`.
-- The QVAC Expo plugin and Android/iOS Fabric packages are configured. On Windows, `scripts/run-android.js` provides a short-path junction for Android builds and normalizes generated QVAC mobile-bundle paths.
+- Expo QVAC SDK and native packages: `@qvac/sdk`, `@qvac/fabric-android-arm64`, and `@qvac/fabric-ios` **0.22.0**.
+- Text model: `LLAMA_3_2_1B_INST_Q4_0` (`Llama-3.2-1B-Instruct-Q4_0.gguf`), about 737 MiB. The model descriptor is in `src/skin-ai/model-config.ts`.
+- Runtime: CPU, 2,048-token context, QVAC fit policy `refuse`.
+- Model download, readiness, error diagnostics, unload, and optional weight removal are handled by `src/skin-ai/qvac-runtime.ts`.
+- Android minimum SDK is 29. Expo's QVAC plugin and build properties are in `app.json`.
+- `scripts/run-android.js` uses a short Windows build path to avoid Gradle path-length problems.
 
-See the [official QVAC SDK v0.22.0 release notes](https://github.com/tetherto/qvac/releases/tag/sdk-v0.22.0) for SDK API changes. The first model download needs network access. Once downloaded, inference and retrieval are local. Airplane-mode inference has not been physically verified in this development environment.
+The initial model download requires a stable internet connection and sufficient free storage. Once the model is downloaded, text generation does not need an AI service or network connection. Offline inference should still be verified on the target phone; a successful build alone does not prove airplane-mode behavior.
 
-## Diagnostics and cleanup
+## Local records and availability
 
-Open **On-device diagnostics** below the chat input to see the selected model, local/no-AI-network execution path, this-session model-load duration, most recent measured reply duration, time to first token, reported total device RAM (when exposed by Android), and context window. These timings come from the running app; this repository does not claim benchmark values. QVAC failures use tagged diagnostics; memory-like native errors include the available RAM limitation. Unloading the model retains downloaded weights; `releaseQvacModel(true)` requests their removal through QVAC cleanup.
+Chat history is stored in local SQLite. Skin profile and product details are cached in account-scoped local storage when available. Daily skin checks, routine steps/logs, and water entries are read from their local databases. Catalog/formula retrieval uses records cached on the device and can refresh a selected uncached profile/formula through existing Supabase-backed data services while online. Uncached records are unavailable offline.
 
-The QVAC text model is text-only. Existing local skin photos can still be selected/displayed in chat, but this provider does not send them to the text model and makes no visual observations. AI photo analysis is not enabled because Android device memory/performance has not been validated.
+The local investigator calculates recorded trends before generation. The model explains those numbers but must not turn timing into causation or missing logs into proof that a step was skipped. Product comparisons use supplied formula signals and the app's profile matcher. The QVAC model is text-only; attaching a photo does not cause image analysis.
 
-## Synthetic demo
+## Diagnostics and testing
 
-Tap **Try the offline demo** in the chat screen. The banner identifies synthetic sample data. Ask **Why has my irritation rating increased this week?**, then ask **What else changed in the sample records?** Both answers use the actual QVAC model and streaming provider. Demo messages and context are held in screen memory and are not inserted into the signed-in user's SQLite chat history. Exit the demo to restore saved chat.
+Open **On-device diagnostics** under the chat composer for the model state, load time, last response time, time to first token, reported total device RAM, and model context size. QVAC errors are logged with a `[Skin AI/QVAC]` prefix. Memory-related errors include a diagnostic that Android does not expose available RAM through this screen. Model unload retains downloaded weights; the explicit cleanup call `releaseQvacModel(true)` asks QVAC to remove them.
 
-All sample records and products are fictional fixtures in `src/skin-ai/demo-data.ts`; sample catalog sources explicitly say synthetic. Never present sample formulas or dates as real product/user facts.
+To verify the complete flow on an Android phone:
 
-## Phone test steps
+1. Connect a phone with USB debugging enabled and confirm Android Debug Bridge can see it.
+2. Install dependencies, run `npm run prebuild:android`, and run `npm run android`.
+3. Open Skin AI on a reliable connection. Wait for model download and loading to finish, then ask a short question and a follow-up.
+4. Attach My Skin and a routine or product to verify the selected context appears with the user message and the response uses the available records.
+5. After any needed profile/product records have been cached, enable Airplane mode and ask another question. A generated response in Airplane mode on the target phone is the offline check.
 
-1. On Windows, connect an Android phone with USB debugging enabled and confirm it is visible to Android Debug Bridge.
-2. Run `npm install`, `npm run prebuild:android`, then `npm run android`. The initial build may need network access for Gradle artifacts. Keep the project on a short Windows path if the junction helper cannot create an alias.
-3. Open Skin AI on Wi-Fi. Leave the app open until the Llama download reaches 100%, the model loads, and diagnostics show **loaded on device**. The model download is about 737 MiB; allow sufficient free storage and a stable connection.
-4. Ask the demo question and one follow-up. Confirm tokens stream into the existing chat bubble and timing fields update.
-5. With the model downloaded, enable Airplane mode and ask another question. A generated answer while Airplane mode is on is the real offline test. A successful build or synthetic demo fixture alone does not prove offline inference.
-6. To test personal context, record skin checks, routine outcomes, water entries, and open/cache a catalog product while online first. Then repeat relevant questions offline. Uncached profile/catalog details cannot be recovered once offline.
+The repository does not claim physical-device or airplane-mode verification unless those steps have actually been run and observed.
 
-## Limitations and blockers
+## Current limits
 
-- The 1B model can be less reliable than a larger model, especially on complex skincare questions; it has a 2K context and short output cap.
-- Product/ingredient retrieval sees only records already cached locally. Initial cache population may require opening the relevant app surfaces online.
-- Retrieval ranking is lexical; spelling variants and concept matches may be missed. Vector retrieval was not added because the installed SDK RAG store is prototype-level and an embedding model would add download/storage/memory costs without target-device proof.
-- The synthetic demo is an inference demonstration, not clinical or product evidence.
-- AI photo analysis, personalized recommendation ranking, causal water/skin claims, and richer ingredient knowledge ingestion are not implemented.
-- No physical Android device has been used to verify download, inference, Airplane mode, low-memory behavior, or APK installation in this task.
-
-## Checks and build commands
-
-Run `npm run typecheck`, `npm run test:skin-ai`, and the existing `test:daily-skin-check`, `test:routine`, `test:intelligence`, `test:intelligence:calibration`, `test:reminders`, and `test:water` scripts. Attempt a native build with `npm run prebuild:android` and `npm run android`; `android` installs/launches and requires a connected device or emulator. Direct Gradle `app:assembleDebug` builds without installing when the Android toolchain is available.
+- Llama 3.2 1B can miss nuance and is less capable than larger hosted models. The app limits input to fit the native 2,048-token context.
+- Formula retrieval can only ground product-specific statements in records available to the app; unknown formulas and missing data must remain unknown.
+- The current model cannot inspect photos. Photo attachments are represented in chat history but their image pixels are not sent to the text model.
+- QVAC does not replace the app's local rules/scorers: deterministic ratings, comparisons, and routine simulations remain application calculations.

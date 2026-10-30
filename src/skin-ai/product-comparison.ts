@@ -23,6 +23,10 @@ function unique(values: string[]) {
   return [...new Set(values.map(clean).filter(Boolean))];
 }
 
+export function asksProductComparison(question: string): boolean {
+  return /\b(compare|comparison|versus|vs\.?|better|which one|which product|which should|which .*\b(use|choose|pick|buy)\b|choose between|from both|between (?:these|them|the two)|difference)\b/i.test(question);
+}
+
 function productSummary(product: ProductEvidence) {
   const name = clean(product.name) || 'Selected product';
   const brand = clean(product.brand);
@@ -52,7 +56,7 @@ function productSummary(product: ProductEvidence) {
 
 /** Deterministic path: never ask the language model to rank or invent product facts. */
 export function buildProductComparison(request: SkinAIRequest): string | null {
-  if (!/\b(compare|comparison|versus|vs\.?|better|which one|which should|choose between|difference)\b/i.test(request.question)) return null;
+  if (!asksProductComparison(request.question)) return null;
   const rawProducts = request.context.product;
   const products = (Array.isArray(rawProducts) ? rawProducts : rawProducts ? [rawProducts] : [])
     .map(object).filter((item): item is ProductEvidence => Boolean(item)).slice(0, 4);
@@ -93,9 +97,14 @@ export function isGroundedProductComparisonResponse(response: string, request: S
     catalogEvidence: request.context.catalogEvidence,
     localProducts: request.context['local-product-cache'],
   }).toLocaleLowerCase();
+  const genericNameTokens = new Set(['the', 'and', 'for', 'with', 'face', 'wash', 'facewash', 'cleanser', 'serum', 'cream', 'gel', 'lotion', 'moisturizer', 'moisturiser', 'sunscreen', 'product', 'skin', 'care', 'gentle', 'daily', 'hydrating']);
   const namedProducts = products.filter((product) => {
     const name = clean(product.name).toLocaleLowerCase();
-    return name.length >= 4 && answer.includes(name);
+    if (name.length >= 4 && answer.includes(name)) return true;
+    // Small local models often shorten long catalog names. Require two
+    // distinctive supplied name tokens so shortened names remain grounded.
+    const anchors = name.split(/[^\p{L}\p{N}]+/u).filter((token) => token.length >= 3 && !genericNameTokens.has(token));
+    return anchors.length >= 2 && anchors.filter((token) => answer.includes(token)).length >= 2;
   });
   if (namedProducts.length < 2) return false;
   if (/\b\d+(?:\.\d+)?\s?%/.test(answer)) {
@@ -104,13 +113,35 @@ export function isGroundedProductComparisonResponse(response: string, request: S
   }
   const productCodes = response.match(/\b[A-Z]{1,3}\d+\b/g) || [];
   if (productCodes.some((value) => !evidence.includes(value.toLocaleLowerCase()))) return false;
-  if (/\b(replac\w*|switch to|add a |try a |more effective|most effective|higher concentration|stronger concentration|more concentrated|better choice|best option|winner)\b/i.test(response)) return false;
+  if (/\b(replac\w*|switch to|add a |try a |more effective|most effective|higher concentration|stronger concentration|more concentrated)\b/i.test(response)) return false;
+  const hasProfileScores = products.length >= 2 && products.every((product) => typeof product.skinMatch?.score === 'number' && Number.isFinite(product.skinMatch.score));
+  if (!hasProfileScores && /\b(better choice|best option|winner|recommend\w*|choose|pick)\b/i.test(response)) return false;
   return true;
+}
+
+export function productComparisonResponseRejectionReason(response: string, request: SkinAIRequest): string | null {
+  const rawProducts = request.context.product;
+  const products = (Array.isArray(rawProducts) ? rawProducts : rawProducts ? [rawProducts] : [])
+    .map(object).filter((item): item is ProductEvidence => Boolean(item)).slice(0, 4);
+  if (products.length < 2) return 'fewer than two product records were supplied';
+  const answer = clean(response).toLocaleLowerCase();
+  if (!isGroundedProductComparisonResponse(response, request)) {
+    const namesCovered = products.filter((product) => {
+      const name = clean(product.name).toLocaleLowerCase();
+      const anchors = name.split(/[^\p{L}\p{N}]+/u).filter((token) => token.length >= 3 && !['the', 'and', 'for', 'with', 'face', 'wash', 'facewash', 'cleanser', 'serum', 'cream', 'gel', 'lotion', 'moisturizer', 'moisturiser', 'sunscreen', 'product', 'skin', 'care', 'gentle', 'daily', 'hydrating'].includes(token));
+      return (name.length >= 4 && answer.includes(name)) || (anchors.length >= 2 && anchors.filter((token) => answer.includes(token)).length >= 2);
+    }).length;
+    if (namesCovered < 2) return 'model output did not identify both supplied products';
+    if (/\b\d+(?:\.\d+)?\s?%/.test(answer)) return 'model output included an unsupported percentage';
+    if ((response.match(/\b[A-Z]{1,3}\d+\b/g) || []).length) return 'model output included an unsupported product code';
+    return 'model output included unsupported recommendation language';
+  }
+  return null;
 }
 
 /** Keep product comparisons off the model path until two parsed formulas are actually available. */
 export function routineShelfComparisonLimitation(request: SkinAIRequest): string | null {
-  const asksForComparison = /\b(compare|comparison|versus|vs\.?|which one|which should|choose between|difference)\b/i.test(request.question);
+  const asksForComparison = asksProductComparison(request.question);
   const productOrRoutineComparison = Boolean(request.context.routine || request.context.shelf || request.context.product)
     || /\b(products?|formulas?|routines?|shelf|cleanser|face ?wash|moisturizer|serum|sunscreen)\b/i.test(request.question);
   if (!asksForComparison || !productOrRoutineComparison) return null;

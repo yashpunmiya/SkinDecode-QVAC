@@ -23,7 +23,6 @@ import type { SkinAIContextAttachment, SkinAIContextType, SkinAIMessage } from '
 import { cacheSkinAIContext, clearSkinAIHistory, getCachedSkinAIContext, loadSkinAIHistory, saveSkinAIMessage } from '../../../src/skin-ai/storage';
 import { getQvacModelState, subscribeQvacModelState } from '../../../src/skin-ai/qvac-runtime';
 import { loadPersonalSkinContext } from '../../../src/skin-ai/personal-context';
-import { SKIN_AI_DEMO_CONTEXT, SKIN_AI_DEMO_QUESTION } from '../../../src/skin-ai/demo-data';
 
 const QUICK_QUESTIONS = [
   'Explain this product for my skin',
@@ -97,7 +96,6 @@ export default function SkinAIScreen() {
   const [productSearchError, setProductSearchError] = useState<string | null>(null);
   const [keyboardVisible, setKeyboardVisible] = useState(false);
   const [diagnosticsVisible, setDiagnosticsVisible] = useState(false);
-  const [demoMode, setDemoMode] = useState(false);
   const modelState = useSyncExternalStore(subscribeQvacModelState, getQvacModelState, getQvacModelState);
   const scrollRef = useRef<ScrollView>(null);
   const productSearchInputRef = useRef<TextInput>(null);
@@ -201,7 +199,7 @@ export default function SkinAIScreen() {
   useEffect(() => {
     let active = true;
     historyOwner.current = userId;
-    setMessages([]); setAttachments([]); setDemoMode(false); setError(null); setLoadingHistory(Boolean(userId));
+    setMessages([]); setAttachments([]); setError(null); setLoadingHistory(Boolean(userId));
     if (!userId) { setLoadingHistory(false); return () => { active = false; }; }
     void loadSkinAIHistory(userId).then((history) => {
       if (active && historyOwner.current === userId) setMessages(history);
@@ -376,7 +374,7 @@ export default function SkinAIScreen() {
     const text = (suggestion || draft).trim();
     if (!text || !userId || typing) return;
     Keyboard.dismiss(); setDraft(''); setError(null);
-    const inferenceAttachments = demoMode ? attachments : attachments.length ? attachments : inheritProductContext(text, messages);
+    const inferenceAttachments = attachments.length ? attachments : inheritProductContext(text, messages);
     const userMessage: SkinAIMessage = { id: newId(), role: 'user', text, createdAt: new Date().toISOString(), attachments: inferenceAttachments.map((item) => ({ ...item })) };
     const next = [...messages, userMessage];
     setMessages(next); setAttachments([]); setTyping(true);
@@ -384,8 +382,8 @@ export default function SkinAIScreen() {
     let reply: SkinAIMessage | null = null;
     let responseText = '';
     try {
-      if (!demoMode) await saveSkinAIMessage(userId, userMessage);
-      const personalContext = demoMode ? SKIN_AI_DEMO_CONTEXT : await loadPersonalSkinContext(userId, text, inferenceAttachments);
+      await saveSkinAIMessage(userId, userMessage);
+      const personalContext = await loadPersonalSkinContext(userId, text, inferenceAttachments);
       const controller = new AbortController(); requestRef.current = controller;
       const replyMessage: SkinAIMessage = { id: newId(), role: 'assistant', text: '', createdAt: new Date().toISOString() };
       reply = replyMessage;
@@ -407,25 +405,16 @@ export default function SkinAIScreen() {
       if (historyOwner.current !== userId) return;
       replyMessage.text = responseText;
       setMessages((current) => current.map((message) => message.id === replyMessage.id ? { ...message, text: responseText } : message));
-      if (!demoMode) await saveSkinAIMessage(userId, replyMessage);
+      await saveSkinAIMessage(userId, replyMessage);
     } catch (reason) {
       if (replyId && responseText && reply) {
         const partial = `${responseText.trimEnd()}\n\nReply stopped before completion. Ask “continue” to resume from here.`;
         setMessages((current) => current.map((message) => message.id === replyId ? { ...message, text: partial } : message));
-        if (!demoMode && reply) await saveSkinAIMessage(userId, { ...reply, text: partial }).catch(() => undefined);
+        if (reply) await saveSkinAIMessage(userId, { ...reply, text: partial }).catch(() => undefined);
       } else if (replyId) setMessages((current) => current.filter((message) => message.id !== replyId));
       if (!(reason instanceof Error && reason.message.toLowerCase().includes('cancel'))) setError(reason instanceof Error ? reason.message : 'Skin AI could not reply. Try again.');
     } finally { requestRef.current = null; setTyping(false); }
-  }, [attachments, demoMode, draft, messages, typing, userId]);
-
-  const toggleDemo = useCallback(() => {
-    requestRef.current?.abort();
-    setError(null); setDraft(''); setAttachments([]);
-    if (demoMode) {
-      setDemoMode(false);
-      if (userId) void loadSkinAIHistory(userId).then(setMessages).catch(() => setMessages([]));
-    } else { setMessages([]); setDemoMode(true); }
-  }, [demoMode, userId]);
+  }, [attachments, draft, messages, typing, userId]);
 
   const confirmClearHistory = useCallback(() => {
     if (!messages.length || typing) return;
@@ -434,7 +423,7 @@ export default function SkinAIScreen() {
       { text: 'Clear history', style: 'destructive', onPress: () => {
         void (async () => {
           try {
-            if (!demoMode && userId) await clearSkinAIHistory(userId);
+            if (userId) await clearSkinAIHistory(userId);
             setMessages([]); setAttachments([]); setDraft(''); setError(null);
           } catch (reason) {
             setError(reason instanceof Error ? reason.message : 'Chat history could not be cleared.');
@@ -442,7 +431,7 @@ export default function SkinAIScreen() {
         })();
       } },
     ]);
-  }, [demoMode, messages.length, typing, userId]);
+  }, [messages.length, typing, userId]);
 
   const latestPrompt = useMemo(() => messages.length === 0, [messages.length]);
   const selectedProducts = useMemo(() => attachments.filter((item) => item.type === 'product-evidence'), [attachments]);
@@ -458,23 +447,19 @@ export default function SkinAIScreen() {
         <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === 'ios' ? 'padding' : 'height'} keyboardVerticalOffset={Platform.OS === 'ios' ? 3 : 0}>
           <View style={styles.stickyChatHeader}><View><Text style={styles.title}>Skin AI</Text><Text style={styles.headerSubtitle}>Private, on-device skincare chat</Text></View><Pressable accessibilityRole="button" accessibilityLabel="Clear chat history" disabled={!messages.length || typing} onPress={confirmClearHistory} style={({ pressed }) => [styles.clearHistoryButton, (!messages.length || typing) && styles.sendDisabled, pressed && styles.pressed]}><Feather name="trash-2" size={15} color="#617568" /><Text style={styles.clearHistoryText}>Clear chat</Text></Pressable></View>
           <ScrollView ref={scrollRef} style={styles.flex} contentContainerStyle={styles.chatContent} keyboardShouldPersistTaps="handled" onContentSizeChange={() => scrollRef.current?.scrollToEnd({ animated: true })} showsVerticalScrollIndicator={false}>
-            {!demoMode ? <Pressable accessibilityRole="button" onPress={() => router.push('/skin-intelligence' as never)} style={({ pressed }) => [styles.intelligenceEntry, pressed && styles.pressed]}><View style={styles.intelligenceEntryIcon}><Feather name="activity" size={15} color="#41684b" /></View><View style={styles.intelligenceEntryCopy}><Text style={styles.intelligenceEntryTitle}>Skin Intelligence</Text><Text style={styles.intelligenceEntryHint}>Your trends, routine signals & weekly report</Text></View><Feather name="chevron-right" size={17} color="#68806b" /></Pressable> : null}
-            <Pressable accessibilityRole="button" accessibilityLabel={demoMode ? 'Exit synthetic demo' : 'Start synthetic offline demo'} disabled={loadingHistory} onPress={toggleDemo} style={[styles.demoBanner, loadingHistory && styles.sendDisabled]}>
-              <Feather name={demoMode ? 'x-circle' : 'play-circle'} size={13} color="#55765d" />
-              <Text style={styles.demoBannerText}>{demoMode ? 'DEMO · synthetic sample data · tap to exit' : 'Try the offline demo · synthetic sample data'}</Text>
-            </Pressable>
+            <Pressable accessibilityRole="button" onPress={() => router.push('/skin-intelligence' as never)} style={({ pressed }) => [styles.intelligenceEntry, pressed && styles.pressed]}><View style={styles.intelligenceEntryIcon}><Feather name="activity" size={15} color="#41684b" /></View><View style={styles.intelligenceEntryCopy}><Text style={styles.intelligenceEntryTitle}>Skin Intelligence</Text><Text style={styles.intelligenceEntryHint}>Your trends, routine signals & weekly report</Text></View><Feather name="chevron-right" size={17} color="#68806b" /></Pressable>
             {loadingHistory ? <View style={styles.loadingHistory}><ActivityIndicator size="small" color="#55765d" /><Text style={styles.muted}>Opening your local chat…</Text></View> : null}
             {latestPrompt && !loadingHistory ? (
               <Animated.View style={[styles.welcome, { opacity: enter, transform: [{ translateY: enter.interpolate({ inputRange: [0, 1], outputRange: [8, 0] }) }] }]}>
                 <Text style={styles.welcomeTitle}>What would you like to understand?</Text>
-                <Text style={styles.welcomeCopy}>{demoMode ? 'This demo uses fictional skin ratings, routine logs, water records, and demo products. Ask the sample question below to see local QVAC analysis.' : 'Ask about your skin, routine, or a product. Add context whenever it helps.'}</Text>
-                {!demoMode ? <View style={styles.quickSection}>
+                <Text style={styles.welcomeCopy}>Ask about your skin, routine, or a product. Add context whenever it helps.</Text>
+                <View style={styles.quickSection}>
                   <View style={styles.quickSectionHeader}><Text style={styles.quickSectionTitle}>Your SkinDecode</Text><Pressable onPress={showContextPicker} style={styles.viewAll}><Text style={styles.viewAllText}>Choose context</Text><Feather name="chevron-right" size={13} color="#68806b" /></Pressable></View>
                   <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.quickActions}>
                     {CONTEXT_CHOICES.map((choice) => <Pressable key={choice.type} disabled={busyContext === choice.type} onPress={() => choice.type === 'product' ? (setSelectingProduct(true), setProductQuery(''), setProductResults([]), showContextPicker()) : void attachContext(choice.type)} style={({ pressed }) => [styles.quickAction, attachments.some((item) => item.type === choice.type || (choice.type === 'product' && item.type === 'product-evidence')) && styles.quickActionSelected, pressed && styles.pressed]}><Feather name={choice.icon} size={14} color="#527259" /><Text style={styles.quickActionText}>{choice.label}</Text>{attachments.some((item) => item.type === choice.type || (choice.type === 'product' && item.type === 'product-evidence')) ? <Feather name="check" size={11} color="#527259" /> : null}</Pressable>)}
                   </ScrollView>
-                </View> : null}
-                <View style={styles.promptSection}><Text style={styles.promptHeading}>{demoMode ? 'Try the demo question' : 'Try asking'}</Text>{(demoMode ? [SKIN_AI_DEMO_QUESTION, 'What else changed in the sample records?'] : QUICK_QUESTIONS.slice(0, 4)).map((question, index) => <Pressable key={question} onPress={() => void send(question)} style={({ pressed }) => [styles.promptRow, index === 0 && styles.promptRowFirst, pressed && styles.pressed]}><Text style={styles.promptText}>{question}</Text><Feather name="arrow-up-right" size={15} color="#748579" /></Pressable>)}</View>
+                </View>
+                <View style={styles.promptSection}><Text style={styles.promptHeading}>Try asking</Text>{QUICK_QUESTIONS.slice(0, 4).map((question, index) => <Pressable key={question} onPress={() => void send(question)} style={({ pressed }) => [styles.promptRow, index === 0 && styles.promptRowFirst, pressed && styles.pressed]}><Text style={styles.promptText}>{question}</Text><Feather name="arrow-up-right" size={15} color="#748579" /></Pressable>)}</View>
               </Animated.View>
             ) : null}
 
@@ -501,7 +486,7 @@ export default function SkinAIScreen() {
               </View>
             ) : null}
             <View style={styles.composerWrap}>
-              {!demoMode ? <Pressable accessibilityRole="button" accessibilityLabel="Attach context" onPress={showContextPicker} style={({ pressed }) => [styles.attachButton, pressed && styles.pressed]}><Feather name="plus" size={21} color="#48684e" /></Pressable> : null}
+              <Pressable accessibilityRole="button" accessibilityLabel="Attach context" onPress={showContextPicker} style={({ pressed }) => [styles.attachButton, pressed && styles.pressed]}><Feather name="plus" size={21} color="#48684e" /></Pressable>
               <TextInput value={draft} onChangeText={setDraft} placeholder="Ask about your skin…" placeholderTextColor="#929c91" style={styles.composerInput} multiline maxLength={1_200} returnKeyType="default" accessibilityLabel="Ask Skin AI" />
               {typing
                 ? <Pressable accessibilityRole="button" accessibilityLabel="Cancel response" onPress={() => requestRef.current?.abort()} style={({ pressed }) => [styles.sendButton, pressed && styles.pressed]}><Feather name="square" size={13} color="#fff" /></Pressable>
@@ -685,7 +670,6 @@ const styles = StyleSheet.create({
   headerText: { flex: 1 }, title: { color: '#1c2d23', fontSize: 19, lineHeight: 24, fontWeight: '700', letterSpacing: -0.4 }, headerSubtitle: { color: '#78837b', fontSize: 12, marginTop: 1, fontWeight: '500' },
   localPill: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 10, paddingVertical: 7, borderRadius: 15, backgroundColor: '#edf3eb' }, localDot: { width: 5, height: 5, borderRadius: 3, backgroundColor: '#648269' }, localLabel: { color: '#58725d', fontSize: 9.5, fontWeight: '600' },
   chatContent: { flexGrow: 1, paddingHorizontal: 20, paddingTop: 15, paddingBottom: 18 }, loadingHistory: { flexDirection: 'row', justifyContent: 'center', alignItems: 'center', gap: 8, padding: 14 }, muted: { color: '#859185', fontSize: 11 },
-  demoBanner: { alignSelf: 'flex-start', flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 7, paddingHorizontal: 9, paddingVertical: 6, borderRadius: 12, backgroundColor: '#eaf1e8' }, demoBannerText: { color: '#55715a', fontSize: 9, fontWeight: '700' },
   welcome: { paddingTop: 23, paddingBottom: 18 }, welcomeTitle: { color: '#1c2d23', fontSize: 23, lineHeight: 29, fontWeight: '700', letterSpacing: -0.55 }, welcomeCopy: { maxWidth: 315, marginTop: 6, color: '#78837b', fontSize: 13, lineHeight: 19 },
   quickSection: { marginTop: 24, paddingTop: 13, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: '#e0e5de' }, quickSectionHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }, quickSectionTitle: { color: '#314438', fontSize: 13, fontWeight: '700' }, viewAll: { flexDirection: 'row', alignItems: 'center', gap: 2, paddingVertical: 4 }, viewAllText: { color: '#55715a', fontSize: 11, fontWeight: '600' },
   quickActions: { gap: 8, paddingTop: 11, paddingBottom: 4 }, quickAction: { minHeight: 36, flexDirection: 'row', alignItems: 'center', gap: 7, paddingHorizontal: 11, borderRadius: 18, backgroundColor: '#f8f8f5', borderWidth: 1, borderColor: '#e8ece5' }, quickActionSelected: { backgroundColor: '#eaf1e8', borderColor: '#d8e4d5' }, quickActionText: { color: '#465a4b', fontSize: 11, fontWeight: '600' },

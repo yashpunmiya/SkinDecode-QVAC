@@ -5,7 +5,14 @@ export function buildEvidenceSynthesisInstructions(question: string, context: Re
   const text = question.toLocaleLowerCase();
   const hasProduct = Boolean(context.product || context['local-product-cache']);
   const hasRoutine = Boolean(context.routine || context.personalFacts);
-  if (hasProduct && /\b(suit|suitable|skin type|good for|right for|match|harmful|safe|unsafe|avoid|irritat|react|risk|won.t suit|bad for)\b/.test(text)) {
+  const asksSuitability = /\b(suit|suitable|skin type|good for|right for|match|harmful|safe|unsafe|avoid|irritat|react|risk|won.t suit|bad for)\b/.test(text);
+  // An attached routine can also supply a local-product-cache. Give the whole
+  // routine request precedence so a suitability phrase doesn't accidentally
+  // route to a single-product score explainer.
+  if (context.routine && asksSuitability) {
+    return 'Analysis task: The user asks which products in the attached routine may not fit their recorded skin profile. Analyze the routine products, not SkinDecode as an app. Name each relevant product exactly as supplied and identify its AM/PM step. Use only the matching cached formula, linked catalog cautions, and app-calculated profile signals; connect a concern to an ingredient only when the evidence explicitly links them. Balance a caution with a supplied positive when one exists. If no product-specific caution is recorded, say so plainly. Do not explain the Skin Match scoring system, invent a score scale, list generic irritants, or give a treatment plan. Keep the answer to 2–4 concise sentences and state what the records cannot establish about personal tolerance.';
+  }
+  if (hasProduct && !context.routine && asksSuitability) {
     return 'Analysis task: Do not merely repeat the attached fields. Explain what the app-calculated Skin Match score and confidence mean in plain language, then connect the strongest supplied positive and caution signals to the recorded profile. State what the formula evidence supports and what it cannot establish (for example, tolerance or outcome). If no calculated score exists, explain that limitation and give a useful evidence-based read of the formula only. Do not add ingredients, concentrations, symptoms, skin zones, or alternatives absent from the context.';
   }
   if (hasRoutine && /\b(routine|steps|tonight|morning|evening|am|pm|proper|consistent|take this)\b/.test(text)) {

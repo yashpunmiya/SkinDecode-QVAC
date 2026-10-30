@@ -1,5 +1,6 @@
 import type { SkinAIContextAttachment, SkinAIMessage, SkinAIRequest } from './types';
 import { SKIN_AI_SYSTEM_PROMPT } from './prompt.ts';
+import { asksProductComparison } from './product-comparison.ts';
 
 const MAX_QUESTION_CHARS = 800;
 const HISTORY_MESSAGES = 4;
@@ -127,7 +128,7 @@ export function buildAIRequest(question: string, attachments: SkinAIContextAttac
   // references from the account-scoped cache so comparison prompts receive the
   // same formula and Skin Match evidence as individually selected products.
   // Keep this focused to explicit comparison requests and at most four items.
-  if (!context.product && /\b(compare|comparison|versus|vs\.?|which one|which should|choose between|difference)\b/i.test(question)) {
+  if (!context.product && asksProductComparison(question)) {
     const ids = new Set<number>();
     for (const item of unique.values()) {
       const data = item.data || {};

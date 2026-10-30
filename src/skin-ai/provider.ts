@@ -2,6 +2,7 @@ import { completion, cancel } from '@qvac/sdk';
 import { ensureQvacModelLoaded, reportQvacInferenceFailure, reportQvacInferenceSuccess, setActiveQvacCompletion } from './qvac-runtime';
 import { buildEvidenceSynthesisInstructions, SKIN_AI_SYSTEM_PROMPT } from './prompt';
 import { renderRetrievedCatalogSources } from './evidence-format';
+import { fitContextNotes } from './context-window';
 import type { AIProvider, SkinAIRequest, SkinAIResponse } from './types';
 
 export type SkinAIRuntimeConfig = {
@@ -67,8 +68,9 @@ async function acquireInferenceSlot(signal?: AbortSignal) {
 }
 
 /** Turn selected app data into short readable notes; raw JSON makes the small model echo its structure. */
-function renderContextNotes(context: Record<string, unknown>): string {
+function renderContextNotes(context: Record<string, unknown>, question: string): string {
   const notes: string[] = [];
+  const asksIngredients = /ingredient|formula|what(?:'s| is) in|contains|list/i.test(question);
   const profile = record(context['skin-profile']);
   if (profile) {
     const facts = [
@@ -137,14 +139,20 @@ function renderContextNotes(context: Record<string, unknown>): string {
     notes.push(`${name}${details.length ? ` — ${details.join('. ')}.` : '.'}`);
   }
 
-  const personalFacts = list(context.personalFacts);
+  const cachedProducts = records(context['local-product-cache']).slice(0, 8);
+  const cachedNames = cachedProducts.map((product) => text(product.name)).filter((name): name is string => Boolean(name));
+  const personalFacts = list(context.personalFacts).filter((fact) => !cachedNames.some((name) => fact.toLocaleLowerCase().startsWith(name.toLocaleLowerCase())));
   if (personalFacts.length) notes.push(...personalFacts);
-  for (const product of records(context['local-product-cache']).slice(0, 6)) {
+  const selectedProductIds = new Set(products.map((value) => Number(record(value)?.productId)).filter((id) => Number.isSafeInteger(id) && id > 0));
+  for (const product of cachedProducts.filter((item) => !selectedProductIds.has(Number(item.productId)))) {
     const name = text(product.name) || 'Cached product';
     const brand = text(product.brand);
-    const findings = records(product.formulaFindings).slice(0, 5).map((item) => `${text(item.kind) || 'catalog'}: ${text(item.label) || 'formula signal'}${list(item.ingredients).length ? ` (${list(item.ingredients).join(', ')})` : ''}`);
-    const ingredients = records(product.ingredients).slice(0, 12).map((item) => `${text(item.name) || 'Ingredient'}${list(item.functions).length ? ` (${list(item.functions).slice(0, 2).join(', ')})` : ''}${list(item.attributes).length ? ` [${records(item.attributes).slice(0, 2).map((attribute) => text(attribute.label)).filter(Boolean).join(', ')}]` : ''}`);
-    notes.push(`Locally cached product: ${name}${brand ? ` by ${brand}` : ''}${findings.length ? `. Catalog formula evidence: ${findings.join('; ')}` : ''}${ingredients.length ? `. Listed formula ingredients: ${ingredients.join('; ')}` : '. The formula details are not cached.'}`);
+    const findings = records(product.formulaFindings).slice(0, 4).map((item) => `${text(item.kind) || 'catalog'}: ${text(item.label) || 'formula signal'}${list(item.ingredients).length ? ` (${list(item.ingredients).slice(0, 2).join(', ')})` : ''}`);
+    const match = record(product.skinMatch);
+    const matchSummary = match ? [typeof match.score === 'number' ? `Skin Match ${match.score}/100 (${text(match.confidence) || 'unrated'} confidence)` : '', list(match.concerns).length ? `profile cautions: ${list(match.concerns).slice(0, 2).join(', ')}` : '', list(match.positives).length ? `profile positives: ${list(match.positives).slice(0, 2).join(', ')}` : ''].filter(Boolean).join('; ') : '';
+    const ingredientLimit = asksIngredients ? 8 : 3;
+    const ingredients = records(product.ingredients).slice(0, ingredientLimit).map((item) => `${text(item.name) || 'Ingredient'}${asksIngredients && list(item.functions).length ? ` (${list(item.functions).slice(0, 1).join(', ')})` : ''}`);
+    notes.push(`Locally cached product: ${name}${brand ? ` by ${brand}` : ''}${matchSummary ? `. ${matchSummary}` : ''}${findings.length ? `. Formula signals: ${findings.join('; ')}` : ''}${ingredients.length ? `. Listed ingredients${asksIngredients ? '' : ' (sample)'}: ${ingredients.join(', ')}` : '. The formula details are not cached.'}`);
   }
   for (const [index, item] of records(context.catalogEvidence).slice(0, 5).entries()) {
     const source = text(item.source) || 'Local catalog';
@@ -179,13 +187,12 @@ export class QvacSkinAIProvider implements AIProvider {
     // Phase 1 is text-only. Explicit photo attachments remain visible in chat history but
     // are deliberately excluded from inference until a photo model is implemented.
     const context = Object.fromEntries(Object.entries(request.context).filter(([key]) => key !== 'photos'));
-    const contextText = renderContextNotes(context);
+    const contextText = renderContextNotes(context, request.question);
     const basePrompt = request.systemPrompt || SKIN_AI_SYSTEM_PROMPT;
     const synthesisInstructions = context.focusedProductAnalysis === true
       ? ''
       : buildEvidenceSynthesisInstructions(request.question, context);
     const promptText = [basePrompt, synthesisInstructions].filter(Boolean).join('\n\n');
-    let boundedSystemContent = [promptText, contextText].filter(Boolean).join('\n\n');
     // The QVAC SDK reports model-specific context overflow only after native inference
     // starts. Estimate conservatively and discard oldest turns first so a normal chat
     // stays below the model window instead of failing with a native context error.
@@ -193,14 +200,18 @@ export class QvacSkinAIProvider implements AIProvider {
       role,
       content: content.replace(/\s+/g, ' ').trim().slice(0, 180),
     }));
+    const requestedHistoryTurns = history.length;
     const question = request.question.replace(/\s+/g, ' ').trim().slice(0, 500);
-    const estimateInputUnits = () => Math.ceil((boundedSystemContent.length + question.length + history.reduce((sum, item) => sum + item.content.length, 0)) / 2.5) + (history.length + 2) * 12;
-    while (history.length && estimateInputUnits() > skinAIRuntimeConfig.maxInputTokens) history.shift();
-    if (estimateInputUnits() > skinAIRuntimeConfig.maxInputTokens && contextText) {
-      const allowedContextChars = Math.max(0, (skinAIRuntimeConfig.maxInputTokens - Math.ceil((promptText.length + question.length) / 2.5) - (history.length + 2) * 12) * 2.5 - promptText.length - 2);
-      boundedSystemContent = [promptText, contextText.slice(0, allowedContextChars)].filter(Boolean).join('\n\n');
+    const estimateInputUnits = (contextChars: number) => Math.ceil((promptText.length + contextChars + question.length + history.reduce((sum, item) => sum + item.content.length, 0)) / 2.5) + (history.length + 2) * 12;
+    while (history.length && estimateInputUnits(contextText.length) > skinAIRuntimeConfig.maxInputTokens) history.shift();
+    const omittedHistoryTurns = requestedHistoryTurns - history.length;
+    const allowedContextChars = Math.max(0, (skinAIRuntimeConfig.maxInputTokens - Math.ceil((promptText.length + question.length) / 2.5) - history.reduce((sum, item) => sum + Math.ceil(item.content.length / 2.5) + 12, 0) - 24) * 2.5 - promptText.length - 2);
+    const fittedContext = fitContextNotes(contextText, Math.floor(allowedContextChars), question);
+    const boundedSystemContent = [promptText, fittedContext.text].filter(Boolean).join('\n\n');
+    if (fittedContext.omitted || omittedHistoryTurns) {
+      console.warn(`[Skin AI/QVAC] Context window kept the highest-relevance notes; ${fittedContext.omitted} context note(s) and ${omittedHistoryTurns} older conversation turn(s) were shortened or omitted.`);
     }
-    if (estimateInputUnits() > skinAIRuntimeConfig.maxInputTokens) {
+    if (estimateInputUnits(fittedContext.text.length) > skinAIRuntimeConfig.maxInputTokens) {
       throw new Error('This message is too long for the on-device model. Please shorten it and try again.');
     }
     const run = completion({

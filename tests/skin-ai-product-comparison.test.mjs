@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildProductComparison, isGroundedProductComparisonResponse, routineShelfComparisonLimitation } from '../src/skin-ai/product-comparison.ts';
+import { asksProductComparison, buildProductComparison, isGroundedProductComparisonResponse, routineShelfComparisonLimitation } from '../src/skin-ai/product-comparison.ts';
 
 const request = (question, products, extra = {}) => ({
   systemPrompt: '', question, context: { product: products, ...extra }, history: [],
@@ -30,6 +30,15 @@ test('non-comparison question stays on the conversational model path', () => {
   assert.equal(buildProductComparison(request('Tell me about this cleanser', [{ name: 'A' }, { name: 'B' }])), null);
 });
 
+test('natural choice wording is recognized as a product comparison', () => {
+  const question = 'Which product I should use from both of them based on my skin type and ingredients?';
+  assert.equal(asksProductComparison(question), true);
+  assert.match(buildProductComparison(request(question, [
+    { name: 'Anti Pimple Neem Facewash', formulaAvailable: true, formulaFindings: [{ label: 'Oil control', kind: 'benefit', ingredients: ['Neem'] }], skinMatch: { score: 71, confidence: 'medium' } },
+    { name: 'Barrier Repair Face Wash', formulaAvailable: true, formulaFindings: [{ label: 'Barrier support', kind: 'benefit', ingredients: ['Ceramide'] }], skinMatch: { score: 84, confidence: 'high' } },
+  ])), /84\/100 versus 71\/100/);
+});
+
 test('comparison response guard accepts evidence-linked discussion and rejects invented product facts', () => {
   const req = request('Compare these products', [
     { name: 'Barrier Calm Cream', formulaAvailable: true, formulaFindings: [{ label: 'Barrier support', kind: 'benefit', ingredients: ['Ceramide'] }], skinMatch: { score: 82, confidence: 'high', positives: ['barrier support'], concerns: [] } },
@@ -39,6 +48,15 @@ test('comparison response guard accepts evidence-linked discussion and rejects i
   assert.equal(isGroundedProductComparisonResponse('Barrier Calm Cream has 20% vitamin C. Daily Balance Gel has 30% retinol and is more effective.', req), false);
   assert.equal(isGroundedProductComparisonResponse('Barrier Calm Cream should be replaced with a stronger serum. Daily Balance Gel is the better choice.', req), false);
   assert.equal(isGroundedProductComparisonResponse('Barrier Calm Cream is a better choice than another serum.', req), false);
+  assert.equal(isGroundedProductComparisonResponse('Barrier Calm Cream is the closer match at 82/100, while Daily Balance Gel scores 76/100; based on those recorded signals, Barrier Calm Cream is the better fit to consider, though the scores cannot predict personal tolerance.', req), true);
+});
+
+test('comparison guard accepts distinctive shortened names from small local models', () => {
+  const req = request('Compare these products', [
+    { name: 'Anti Pimple Neem Facewash', formulaAvailable: true },
+    { name: 'Barrier Repair Gentle Hydrating Facewash', formulaAvailable: true },
+  ]);
+  assert.equal(isGroundedProductComparisonResponse('The Anti Pimple wash has a recorded caution. Barrier Repair Hydrating Facewash has a different formula signal, but the app records do not establish which you will tolerate better.', req), true);
 });
 
 test('routine and shelf comparisons do not reach the model without two parsed product formulas', () => {
