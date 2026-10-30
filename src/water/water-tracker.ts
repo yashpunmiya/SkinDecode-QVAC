@@ -8,6 +8,8 @@ export type WaterSnapshot = {
   goal: number;
 };
 
+export type WaterHistoryEntry = { localDate: string; glasses: number };
+
 let databasePromise: Promise<SQLite.SQLiteDatabase> | undefined;
 
 async function openWaterDatabase() {
@@ -91,6 +93,16 @@ export async function loadWaterSnapshot(userId: string, localDate: string): Prom
     glasses: Math.max(0, day?.glasses ?? 0),
     goal: Math.min(MAX_WATER_GOAL, Math.max(1, preferences?.daily_goal ?? DEFAULT_WATER_GOAL)),
   };
+}
+
+/** Returns only dates with a saved water record; missing dates remain unrecorded, not zero. */
+export async function loadWaterHistory(userId: string, fromDate: string, throughDate: string): Promise<WaterHistoryEntry[]> {
+  const database = await openWaterDatabase();
+  const rows = await database.getAllAsync<{ local_date: string; glasses: number }>(
+    'SELECT local_date,glasses FROM water_daily_entries WHERE user_id=? AND local_date>=? AND local_date<=? ORDER BY local_date ASC',
+    userId, fromDate, throughDate,
+  );
+  return rows.map((row) => ({ localDate: row.local_date, glasses: Math.max(0, row.glasses) }));
 }
 
 export async function saveWaterSnapshot(userId: string, localDate: string, snapshot: WaterSnapshot) {

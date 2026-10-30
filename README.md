@@ -18,3 +18,7 @@ Google sign-in returns an ID token to the app, which is exchanged directly with 
 After Google sign-in, users without a completed profile go through the skincare onboarding flow. Their in-progress answers and current step are stored in Expo SecureStore on that device; completed answers are stored in `public.user_profiles` under the matching `auth.users.id`. The table uses row-level security so authenticated users can only read and write their own profile.
 
 Apply `supabase/migrations/202609250001_create_user_profiles.sql` to the Supabase project before running the updated app. You can paste it into the Supabase SQL Editor or apply it with the Supabase CLI (`supabase db push`). Existing users will be asked to complete onboarding once; users with `onboarding_completed = true` go directly to the empty Home screen.
+
+## Offline Skin AI (QVAC)
+
+Skin AI uses QVAC for on-device text inference with a locally cached Llama 3.2 1B model. It retrieves relevant local profile, routine, skin-check, water, and cached product/formula data; chat history remains in local SQLite. The initial model download needs internet. See [the QVAC architecture, offline test steps, and synthetic demo guide](docs/SKIN_AI_QVAC.md) for model/version details and limitations.

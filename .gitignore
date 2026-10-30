@@ -1,4 +1,5 @@
 node_modules/
+/qvac/
 .expo/
 dist/
 web-build/

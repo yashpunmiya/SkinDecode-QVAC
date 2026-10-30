@@ -1,8 +1,8 @@
 import { Feather } from '@expo/vector-icons';
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import {
-  ActivityIndicator, Animated, Image, Keyboard, KeyboardAvoidingView, Modal, Platform,
+  ActivityIndicator, Alert, Animated, Image, Keyboard, KeyboardAvoidingView, Modal, Platform,
   Pressable, ScrollView, StyleSheet, Text, TextInput, View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -20,7 +20,10 @@ import { localDateKey } from '../../../src/routine/models';
 import type { UserProfileRow } from '../../../src/types/database.types';
 import { AIChatService } from '../../../src/skin-ai/chat-service';
 import type { SkinAIContextAttachment, SkinAIContextType, SkinAIMessage } from '../../../src/skin-ai/types';
-import { cacheSkinAIContext, getCachedSkinAIContext, loadSkinAIHistory, saveSkinAIMessage } from '../../../src/skin-ai/storage';
+import { cacheSkinAIContext, clearSkinAIHistory, getCachedSkinAIContext, loadSkinAIHistory, saveSkinAIMessage } from '../../../src/skin-ai/storage';
+import { getQvacModelState, subscribeQvacModelState } from '../../../src/skin-ai/qvac-runtime';
+import { loadPersonalSkinContext } from '../../../src/skin-ai/personal-context';
+import { SKIN_AI_DEMO_CONTEXT, SKIN_AI_DEMO_QUESTION } from '../../../src/skin-ai/demo-data';
 
 const QUICK_QUESTIONS = [
   'Explain this product for my skin',
@@ -43,6 +46,26 @@ function profileFromRow(row: UserProfileRow): SkinProfile {
     concerns: row.skin_concerns || [], goals: row.skin_goals || [], preferences: row.preferences || [] };
 }
 function readable(value: unknown) { return typeof value === 'string' ? value.replaceAll('_', ' ') : ''; }
+function formatAssistantText(value: string) {
+  return value
+    .replace(/```[a-z]*\n?([\s\S]*?)```/gi, '$1')
+    .replace(/^#{1,3}\s+/gm, '')
+    .replace(/^\s*[-*]\s+/gm, '• ')
+    .replace(/\*\*([^*]+)\*\*/g, '$1')
+    .replace(/\*([^*]+)\*/g, '$1')
+    .replace(/`([^`]+)`/g, '$1')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+function inheritProductContext(question: string, messages: SkinAIMessage[]): SkinAIContextAttachment[] {
+  if (!/\b(this|that|it|these|those|ingredients?|harmful|suit|suitable|irritat|face\s?wash|cleanser|product|formula|for me|my skin)\b/i.test(question)) return [];
+  const previous = [...messages].reverse().slice(0, 8).find((message) => message.role === 'user'
+    && message.attachments?.some((item) => item.type === 'product' || item.type === 'product-evidence'));
+  if (!previous?.attachments?.length) return [];
+  // Product/profile context remains available for direct follow-ups in this chat.
+  // Photos are intentionally never inherited into a later inference request.
+  return previous.attachments.filter((item) => ['product', 'product-evidence', 'skin-profile'].includes(item.type));
+}
 function makeAttachment(type: SkinAIContextType, label: string, summary: string, data: Record<string, unknown> = {}, sourceId?: string | number): SkinAIContextAttachment {
   return { id: `${type}:${String(sourceId ?? 'current')}`, type, label, summary, ...(sourceId !== undefined ? { sourceId } : {}), selectedByUser: true, data };
 }
@@ -73,6 +96,9 @@ export default function SkinAIScreen() {
   const [productSearching, setProductSearching] = useState(false);
   const [productSearchError, setProductSearchError] = useState<string | null>(null);
   const [keyboardVisible, setKeyboardVisible] = useState(false);
+  const [diagnosticsVisible, setDiagnosticsVisible] = useState(false);
+  const [demoMode, setDemoMode] = useState(false);
+  const modelState = useSyncExternalStore(subscribeQvacModelState, getQvacModelState, getQvacModelState);
   const scrollRef = useRef<ScrollView>(null);
   const productSearchInputRef = useRef<TextInput>(null);
   const requestRef = useRef<AbortController | null>(null);
@@ -84,6 +110,7 @@ export default function SkinAIScreen() {
   useEffect(() => {
     Animated.timing(enter, { toValue: 1, duration: 460, useNativeDriver: true }).start();
   }, [enter]);
+
 
   useEffect(() => {
     const show = Keyboard.addListener('keyboardDidShow', () => setKeyboardVisible(true));
@@ -174,7 +201,7 @@ export default function SkinAIScreen() {
   useEffect(() => {
     let active = true;
     historyOwner.current = userId;
-    setMessages([]); setAttachments([]); setError(null); setLoadingHistory(Boolean(userId));
+    setMessages([]); setAttachments([]); setDemoMode(false); setError(null); setLoadingHistory(Boolean(userId));
     if (!userId) { setLoadingHistory(false); return () => { active = false; }; }
     void loadSkinAIHistory(userId).then((history) => {
       if (active && historyOwner.current === userId) setMessages(history);
@@ -243,6 +270,30 @@ export default function SkinAIScreen() {
         if (!row?.onboarding_completed) throw new Error('Your skin profile is not available yet.');
         const profile = profileFromRow(row);
         const summary = [profile.skinType && `${readable(profile.skinType)} skin`, profile.sensitivity && `${readable(profile.sensitivity)} sensitivity`, profile.concerns.length && `Focus: ${profile.concerns.slice(0, 2).map(readable).join(', ')}`, profile.goals.length && `Goals: ${profile.goals.slice(0, 2).map(readable).join(', ')}`, profile.preferences.length && `Preferences: ${profile.preferences.slice(0, 2).map(readable).join(', ')}`].filter(Boolean).join(' · ');
+        const cachedMatches = await Promise.all(attachments.filter((item) => item.type === 'product-evidence').map(async (item) => {
+          const productId = Number(item.sourceId);
+          if (!Number.isSafeInteger(productId)) return null;
+          const cached = await getCachedProduct(productId).catch(() => null);
+          if (!cached?.product) return null;
+          const match = scoreProductMatch(cached.product, profile);
+          return {
+            id: item.id,
+            data: {
+              ...(item.data || {}),
+              skinMatch: {
+                score: match.score, confidence: match.confidence,
+                positives: match.strongestPositives.slice(0, 3).map((reason) => reason.label),
+                concerns: match.strongestConcerns.slice(0, 3).map((reason) => reason.label),
+              },
+            },
+          };
+        }));
+        if (cachedMatches.some(Boolean)) {
+          setAttachments((current) => current.map((item) => {
+            const update = cachedMatches.find((candidate) => candidate?.id === item.id);
+            return update ? { ...item, data: update.data } : item;
+          }));
+        }
         const attachment = makeAttachment(type, 'My Skin', summary || 'Skin profile', profile as unknown as Record<string, unknown>, userId);
         await cacheSkinAIContext(userId, cacheKey, attachment); addAttachment(attachment);
       } else if (type === 'routine') {
@@ -296,12 +347,17 @@ export default function SkinAIScreen() {
         const product = result.product;
         const formula = product.formulas[0];
         const match = profile ? scoreProductMatch(product, profile) : null;
-        const responsible = match ? [...match.strongestPositives, ...match.strongestConcerns].flatMap((reason) => reason.ingredientNames).slice(0, 6) : [];
         const data = {
           productId: product.productId, name: product.name, brand: product.brand, category: product.category, imageUrl: formula?.imageUrl || product.imageUrl,
           formulaId: formula?.id, ingredientNames: formula?.ingredients.slice(0, 18).map((ingredient) => ingredient.inciName || ingredient.name),
           formulaAnalysis: formula?.analysis.slice(0, 10).map((item) => ({ label: item.label, kind: item.kind, state: item.state, ingredients: item.responsibleIngredients.slice(0, 4).map((ingredient) => ingredient.inciName || ingredient.name) })),
-          skinMatch: match ? { score: match.score, confidence: match.confidence, positives: match.strongestPositives.slice(0, 3).map((reason) => reason.label), concerns: match.strongestConcerns.slice(0, 3).map((reason) => reason.label), linkedIngredients: [...new Set(responsible)].slice(0, 6) } : undefined,
+          skinMatch: match ? {
+            score: match.score, confidence: match.confidence,
+            positives: match.strongestPositives.slice(0, 3).map((reason) => reason.label),
+            concerns: match.strongestConcerns.slice(0, 3).map((reason) => reason.label),
+            positiveEvidence: match.strongestPositives.slice(0, 3).map((reason) => ({ label: reason.label, ingredients: reason.ingredientNames.slice(0, 4), dimension: reason.dimension })),
+            cautionEvidence: match.strongestConcerns.slice(0, 3).map((reason) => ({ label: reason.label, ingredients: reason.ingredientNames.slice(0, 4), dimension: reason.dimension })),
+          } : undefined,
           hasParsedFormula: product.hasParsedFormula,
         };
         const label = routeLabel?.includes(' · ') ? routeLabel.split(' · ').slice(-1)[0] || product.name : routeLabel || product.name;
@@ -320,21 +376,73 @@ export default function SkinAIScreen() {
     const text = (suggestion || draft).trim();
     if (!text || !userId || typing) return;
     Keyboard.dismiss(); setDraft(''); setError(null);
-    const userMessage: SkinAIMessage = { id: newId(), role: 'user', text, createdAt: new Date().toISOString(), attachments: attachments.map((item) => ({ ...item })) };
+    const inferenceAttachments = demoMode ? attachments : attachments.length ? attachments : inheritProductContext(text, messages);
+    const userMessage: SkinAIMessage = { id: newId(), role: 'user', text, createdAt: new Date().toISOString(), attachments: inferenceAttachments.map((item) => ({ ...item })) };
     const next = [...messages, userMessage];
     setMessages(next); setAttachments([]); setTyping(true);
+    let replyId: string | null = null;
+    let reply: SkinAIMessage | null = null;
+    let responseText = '';
     try {
-      await saveSkinAIMessage(userId, userMessage);
+      if (!demoMode) await saveSkinAIMessage(userId, userMessage);
+      const personalContext = demoMode ? SKIN_AI_DEMO_CONTEXT : await loadPersonalSkinContext(userId, text, inferenceAttachments);
       const controller = new AbortController(); requestRef.current = controller;
-      const response = await AIChatService.answer(text, userMessage.attachments || [], messages, controller.signal);
+      const replyMessage: SkinAIMessage = { id: newId(), role: 'assistant', text: '', createdAt: new Date().toISOString() };
+      reply = replyMessage;
+      replyId = replyMessage.id;
+      setMessages((current) => [...current, replyMessage]);
+      let lastPaintAt = 0;
+      for await (const chunk of AIChatService.stream(text, inferenceAttachments, messages, controller.signal, personalContext)) {
+        responseText += chunk;
+        if (historyOwner.current !== userId) return;
+        // Native QVAC can emit many tiny tokens per second. Updating the whole
+        // transcript for every token makes the scroll view stutter on midrange phones.
+        const now = Date.now();
+        if (now - lastPaintAt >= 50) {
+          lastPaintAt = now;
+          const visibleText = responseText;
+          setMessages((current) => current.map((message) => message.id === replyMessage.id ? { ...message, text: visibleText } : message));
+        }
+      }
       if (historyOwner.current !== userId) return;
-      const reply: SkinAIMessage = { id: newId(), role: 'assistant', text: response.text, createdAt: new Date().toISOString() };
-      setMessages((current) => [...current, reply]);
-      await saveSkinAIMessage(userId, reply);
+      replyMessage.text = responseText;
+      setMessages((current) => current.map((message) => message.id === replyMessage.id ? { ...message, text: responseText } : message));
+      if (!demoMode) await saveSkinAIMessage(userId, replyMessage);
     } catch (reason) {
+      if (replyId && responseText && reply) {
+        const partial = `${responseText.trimEnd()}\n\nReply stopped before completion. Ask “continue” to resume from here.`;
+        setMessages((current) => current.map((message) => message.id === replyId ? { ...message, text: partial } : message));
+        if (!demoMode && reply) await saveSkinAIMessage(userId, { ...reply, text: partial }).catch(() => undefined);
+      } else if (replyId) setMessages((current) => current.filter((message) => message.id !== replyId));
       if (!(reason instanceof Error && reason.message.toLowerCase().includes('cancel'))) setError(reason instanceof Error ? reason.message : 'Skin AI could not reply. Try again.');
     } finally { requestRef.current = null; setTyping(false); }
-  }, [attachments, draft, messages, typing, userId]);
+  }, [attachments, demoMode, draft, messages, typing, userId]);
+
+  const toggleDemo = useCallback(() => {
+    requestRef.current?.abort();
+    setError(null); setDraft(''); setAttachments([]);
+    if (demoMode) {
+      setDemoMode(false);
+      if (userId) void loadSkinAIHistory(userId).then(setMessages).catch(() => setMessages([]));
+    } else { setMessages([]); setDemoMode(true); }
+  }, [demoMode, userId]);
+
+  const confirmClearHistory = useCallback(() => {
+    if (!messages.length || typing) return;
+    Alert.alert('Clear chat history?', 'This removes your saved Skin AI messages and cached chat context from this device.', [
+      { text: 'Cancel', style: 'cancel' },
+      { text: 'Clear history', style: 'destructive', onPress: () => {
+        void (async () => {
+          try {
+            if (!demoMode && userId) await clearSkinAIHistory(userId);
+            setMessages([]); setAttachments([]); setDraft(''); setError(null);
+          } catch (reason) {
+            setError(reason instanceof Error ? reason.message : 'Chat history could not be cleared.');
+          }
+        })();
+      } },
+    ]);
+  }, [demoMode, messages.length, typing, userId]);
 
   const latestPrompt = useMemo(() => messages.length === 0, [messages.length]);
   const selectedProducts = useMemo(() => attachments.filter((item) => item.type === 'product-evidence'), [attachments]);
@@ -348,19 +456,25 @@ export default function SkinAIScreen() {
     <TabScreenTransition>
       <SafeAreaView style={styles.safeArea} edges={['top', 'left', 'right']}>
         <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === 'ios' ? 'padding' : 'height'} keyboardVerticalOffset={Platform.OS === 'ios' ? 3 : 0}>
+          <View style={styles.stickyChatHeader}><View><Text style={styles.title}>Skin AI</Text><Text style={styles.headerSubtitle}>Private, on-device skincare chat</Text></View><Pressable accessibilityRole="button" accessibilityLabel="Clear chat history" disabled={!messages.length || typing} onPress={confirmClearHistory} style={({ pressed }) => [styles.clearHistoryButton, (!messages.length || typing) && styles.sendDisabled, pressed && styles.pressed]}><Feather name="trash-2" size={15} color="#617568" /><Text style={styles.clearHistoryText}>Clear chat</Text></Pressable></View>
           <ScrollView ref={scrollRef} style={styles.flex} contentContainerStyle={styles.chatContent} keyboardShouldPersistTaps="handled" onContentSizeChange={() => scrollRef.current?.scrollToEnd({ animated: true })} showsVerticalScrollIndicator={false}>
+            {!demoMode ? <Pressable accessibilityRole="button" onPress={() => router.push('/skin-intelligence' as never)} style={({ pressed }) => [styles.intelligenceEntry, pressed && styles.pressed]}><View style={styles.intelligenceEntryIcon}><Feather name="activity" size={15} color="#41684b" /></View><View style={styles.intelligenceEntryCopy}><Text style={styles.intelligenceEntryTitle}>Skin Intelligence</Text><Text style={styles.intelligenceEntryHint}>Your trends, routine signals & weekly report</Text></View><Feather name="chevron-right" size={17} color="#68806b" /></Pressable> : null}
+            <Pressable accessibilityRole="button" accessibilityLabel={demoMode ? 'Exit synthetic demo' : 'Start synthetic offline demo'} disabled={loadingHistory} onPress={toggleDemo} style={[styles.demoBanner, loadingHistory && styles.sendDisabled]}>
+              <Feather name={demoMode ? 'x-circle' : 'play-circle'} size={13} color="#55765d" />
+              <Text style={styles.demoBannerText}>{demoMode ? 'DEMO · synthetic sample data · tap to exit' : 'Try the offline demo · synthetic sample data'}</Text>
+            </Pressable>
             {loadingHistory ? <View style={styles.loadingHistory}><ActivityIndicator size="small" color="#55765d" /><Text style={styles.muted}>Opening your local chat…</Text></View> : null}
             {latestPrompt && !loadingHistory ? (
               <Animated.View style={[styles.welcome, { opacity: enter, transform: [{ translateY: enter.interpolate({ inputRange: [0, 1], outputRange: [8, 0] }) }] }]}>
                 <Text style={styles.welcomeTitle}>What would you like to understand?</Text>
-                <Text style={styles.welcomeCopy}>Ask about your skin, routine, or a product. Add context whenever it helps.</Text>
-                <View style={styles.quickSection}>
+                <Text style={styles.welcomeCopy}>{demoMode ? 'This demo uses fictional skin ratings, routine logs, water records, and demo products. Ask the sample question below to see local QVAC analysis.' : 'Ask about your skin, routine, or a product. Add context whenever it helps.'}</Text>
+                {!demoMode ? <View style={styles.quickSection}>
                   <View style={styles.quickSectionHeader}><Text style={styles.quickSectionTitle}>Your SkinDecode</Text><Pressable onPress={showContextPicker} style={styles.viewAll}><Text style={styles.viewAllText}>Choose context</Text><Feather name="chevron-right" size={13} color="#68806b" /></Pressable></View>
                   <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.quickActions}>
                     {CONTEXT_CHOICES.map((choice) => <Pressable key={choice.type} disabled={busyContext === choice.type} onPress={() => choice.type === 'product' ? (setSelectingProduct(true), setProductQuery(''), setProductResults([]), showContextPicker()) : void attachContext(choice.type)} style={({ pressed }) => [styles.quickAction, attachments.some((item) => item.type === choice.type || (choice.type === 'product' && item.type === 'product-evidence')) && styles.quickActionSelected, pressed && styles.pressed]}><Feather name={choice.icon} size={14} color="#527259" /><Text style={styles.quickActionText}>{choice.label}</Text>{attachments.some((item) => item.type === choice.type || (choice.type === 'product' && item.type === 'product-evidence')) ? <Feather name="check" size={11} color="#527259" /> : null}</Pressable>)}
                   </ScrollView>
-                </View>
-                <View style={styles.promptSection}><Text style={styles.promptHeading}>Try asking</Text>{QUICK_QUESTIONS.slice(0, 4).map((question, index) => <Pressable key={question} onPress={() => void send(question)} style={({ pressed }) => [styles.promptRow, index === 0 && styles.promptRowFirst, pressed && styles.pressed]}><Text style={styles.promptText}>{question}</Text><Feather name="arrow-up-right" size={15} color="#748579" /></Pressable>)}</View>
+                </View> : null}
+                <View style={styles.promptSection}><Text style={styles.promptHeading}>{demoMode ? 'Try the demo question' : 'Try asking'}</Text>{(demoMode ? [SKIN_AI_DEMO_QUESTION, 'What else changed in the sample records?'] : QUICK_QUESTIONS.slice(0, 4)).map((question, index) => <Pressable key={question} onPress={() => void send(question)} style={({ pressed }) => [styles.promptRow, index === 0 && styles.promptRowFirst, pressed && styles.pressed]}><Text style={styles.promptText}>{question}</Text><Feather name="arrow-up-right" size={15} color="#748579" /></Pressable>)}</View>
               </Animated.View>
             ) : null}
 
@@ -369,22 +483,39 @@ export default function SkinAIScreen() {
                 {message.role === 'assistant' ? <View style={styles.messageMark}><Feather name="droplet" size={12} color="#4e7255" /></View> : null}
                 <View style={[styles.messageBubble, message.role === 'user' ? styles.userBubble : styles.assistantBubble]}>
                   {message.attachments?.length ? <View style={styles.messageContextList}>{message.attachments.map((item) => <View key={item.id} style={styles.messageContext}><Feather name={iconFor(item.type)} size={10} color="#55765d" /><Text numberOfLines={1} style={styles.messageContextLabel}>{item.label}</Text></View>)}</View> : null}
-                  <Text style={[styles.messageText, message.role === 'user' && styles.userMessageText]}>{message.text}</Text>
+                  <Text style={[styles.messageText, message.role === 'user' && styles.userMessageText]}>{message.role === 'assistant' ? formatAssistantText(message.text) : message.text}</Text>
                 </View>
               </View>
             ))}
-            {typing ? <View style={styles.typingRow}><View style={styles.messageMark}><Feather name="droplet" size={12} color="#4e7255" /></View><View style={styles.typingBubble}><TypingDots /></View><Text style={styles.typingLabel}>Thinking…</Text></View> : null}
+            {typing ? <View style={styles.typingRow}><View style={styles.typingBubble}><TypingDots /></View><Text style={styles.typingLabel}>Thinking…</Text></View> : null}
             {error ? <View style={styles.errorBanner}><Feather name="alert-circle" size={14} color="#92594f" /><Text style={styles.errorText}>{error}</Text><Pressable onPress={() => setError(null)}><Feather name="x" size={15} color="#92594f" /></Pressable></View> : null}
           </ScrollView>
 
           <View style={[styles.composerDock, { paddingBottom: keyboardVisible ? 4 : 84 }]}>
             {attachments.length ? <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.previewStrip}>{attachments.map((item) => <CompactAttachment key={item.id} attachment={item} onRemove={() => removeAttachment(item.id)} />)}</ScrollView> : null}
+            {modelState.phase === 'downloading' || modelState.phase === 'loading' || modelState.phase === 'error' ? (
+              <View style={styles.modelStatus}>
+                <Text style={styles.modelStatusText}>{modelState.message}{modelState.progress !== null ? ` · ${modelState.progress}%` : ''}</Text>
+                {modelState.progress !== null ? <View style={styles.modelProgressTrack}><View style={[styles.modelProgressFill, { width: `${modelState.progress}%` }]} /></View> : null}
+                {modelState.diagnostic ? <Text style={styles.modelDiagnostic}>{modelState.diagnostic}</Text> : null}
+              </View>
+            ) : null}
             <View style={styles.composerWrap}>
-              <Pressable accessibilityRole="button" accessibilityLabel="Attach context" onPress={showContextPicker} style={({ pressed }) => [styles.attachButton, pressed && styles.pressed]}><Feather name="plus" size={21} color="#48684e" /></Pressable>
+              {!demoMode ? <Pressable accessibilityRole="button" accessibilityLabel="Attach context" onPress={showContextPicker} style={({ pressed }) => [styles.attachButton, pressed && styles.pressed]}><Feather name="plus" size={21} color="#48684e" /></Pressable> : null}
               <TextInput value={draft} onChangeText={setDraft} placeholder="Ask about your skin…" placeholderTextColor="#929c91" style={styles.composerInput} multiline maxLength={1_200} returnKeyType="default" accessibilityLabel="Ask Skin AI" />
-              <Pressable accessibilityRole="button" accessibilityLabel="Send message" disabled={!draft.trim() || typing} onPress={() => void send()} style={({ pressed }) => [styles.sendButton, (!draft.trim() || typing) && styles.sendDisabled, pressed && styles.pressed]}>{typing ? <ActivityIndicator size="small" color="#fff" /> : <Feather name="arrow-up" size={17} color="#fff" />}</Pressable>
+              {typing
+                ? <Pressable accessibilityRole="button" accessibilityLabel="Cancel response" onPress={() => requestRef.current?.abort()} style={({ pressed }) => [styles.sendButton, pressed && styles.pressed]}><Feather name="square" size={13} color="#fff" /></Pressable>
+                : <Pressable accessibilityRole="button" accessibilityLabel="Send message" disabled={!draft.trim()} onPress={() => void send()} style={({ pressed }) => [styles.sendButton, !draft.trim() && styles.sendDisabled, pressed && styles.pressed]}><Feather name="arrow-up" size={17} color="#fff" /></Pressable>}
             </View>
-            <Text style={styles.privacyNote}></Text>
+            <Pressable accessibilityRole="button" accessibilityLabel="Toggle on-device diagnostics" onPress={() => setDiagnosticsVisible((visible) => !visible)} style={styles.diagnosticsToggle}>
+              <Text style={styles.privacyNote}>On-device diagnostics {diagnosticsVisible ? '⌃' : '⌄'}</Text>
+            </Pressable>
+            {diagnosticsVisible ? <View style={styles.diagnosticsPanel}>
+              <Text style={styles.diagnosticsText}>Model: {modelState.phase === 'ready' ? 'Llama 3.2 1B Instruct Q4_0 · loaded on device' : `${modelState.phase} · Llama 3.2 1B Instruct Q4_0`}</Text>
+              <Text style={styles.diagnosticsText}>AI network: none · inference: local QVAC · context retrieval: local databases</Text>
+              <Text style={styles.diagnosticsText}>Model load: {modelState.modelLoadMs === null ? 'not measured this session' : `${(modelState.modelLoadMs / 1000).toFixed(1)} s`} · last reply: {modelState.lastInferenceMs === null ? 'not measured' : `${(modelState.lastInferenceMs / 1000).toFixed(1)} s`}{modelState.lastTimeToFirstTokenMs === null ? '' : ` · first token ${(modelState.lastTimeToFirstTokenMs / 1000).toFixed(1)} s`}</Text>
+              <Text style={styles.diagnosticsText}>Device RAM: {modelState.totalMemoryBytes === null ? 'unavailable' : `${(modelState.totalMemoryBytes / 1024 ** 3).toFixed(1)} GB total`} · context window: 2,048 tokens</Text>
+            </View> : null}
           </View>
         </KeyboardAvoidingView>
 
@@ -547,11 +678,14 @@ function TypingDots() {
 }
 
 const styles = StyleSheet.create({
+  intelligenceEntry: { flexDirection: 'row', alignItems: 'center', gap: 10, padding: 12, marginBottom: 9, borderRadius: 15, borderWidth: 1, borderColor: '#dfe8dc', backgroundColor: '#f2f6ef' }, intelligenceEntryIcon: { width: 30, height: 30, borderRadius: 10, backgroundColor: '#e3eee2', alignItems: 'center', justifyContent: 'center' }, intelligenceEntryCopy: { flex: 1 }, intelligenceEntryTitle: { color: '#193d2a', fontSize: 13, fontWeight: '700' }, intelligenceEntryHint: { color: '#68776f', fontSize: 10, marginTop: 2 },
+  stickyChatHeader: { minHeight: 62, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 22, paddingVertical: 8, backgroundColor: '#f5f5f2', borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: '#e7e9e3' }, clearHistoryButton: { minHeight: 36, flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 10, borderRadius: 12, backgroundColor: '#edf1eb' }, clearHistoryText: { color: '#617568', fontSize: 11, fontWeight: '600' },
   flex: { flex: 1 }, safeArea: { flex: 1, backgroundColor: '#f5f5f2' },
   header: { minHeight: 66, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 21, paddingTop: 2, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: '#e7e9e3' },
   headerText: { flex: 1 }, title: { color: '#1c2d23', fontSize: 19, lineHeight: 24, fontWeight: '700', letterSpacing: -0.4 }, headerSubtitle: { color: '#78837b', fontSize: 12, marginTop: 1, fontWeight: '500' },
   localPill: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 10, paddingVertical: 7, borderRadius: 15, backgroundColor: '#edf3eb' }, localDot: { width: 5, height: 5, borderRadius: 3, backgroundColor: '#648269' }, localLabel: { color: '#58725d', fontSize: 9.5, fontWeight: '600' },
   chatContent: { flexGrow: 1, paddingHorizontal: 20, paddingTop: 15, paddingBottom: 18 }, loadingHistory: { flexDirection: 'row', justifyContent: 'center', alignItems: 'center', gap: 8, padding: 14 }, muted: { color: '#859185', fontSize: 11 },
+  demoBanner: { alignSelf: 'flex-start', flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 7, paddingHorizontal: 9, paddingVertical: 6, borderRadius: 12, backgroundColor: '#eaf1e8' }, demoBannerText: { color: '#55715a', fontSize: 9, fontWeight: '700' },
   welcome: { paddingTop: 23, paddingBottom: 18 }, welcomeTitle: { color: '#1c2d23', fontSize: 23, lineHeight: 29, fontWeight: '700', letterSpacing: -0.55 }, welcomeCopy: { maxWidth: 315, marginTop: 6, color: '#78837b', fontSize: 13, lineHeight: 19 },
   quickSection: { marginTop: 24, paddingTop: 13, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: '#e0e5de' }, quickSectionHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }, quickSectionTitle: { color: '#314438', fontSize: 13, fontWeight: '700' }, viewAll: { flexDirection: 'row', alignItems: 'center', gap: 2, paddingVertical: 4 }, viewAllText: { color: '#55715a', fontSize: 11, fontWeight: '600' },
   quickActions: { gap: 8, paddingTop: 11, paddingBottom: 4 }, quickAction: { minHeight: 36, flexDirection: 'row', alignItems: 'center', gap: 7, paddingHorizontal: 11, borderRadius: 18, backgroundColor: '#f8f8f5', borderWidth: 1, borderColor: '#e8ece5' }, quickActionSelected: { backgroundColor: '#eaf1e8', borderColor: '#d8e4d5' }, quickActionText: { color: '#465a4b', fontSize: 11, fontWeight: '600' },
@@ -562,7 +696,7 @@ const styles = StyleSheet.create({
   previewStrip: { height: 48, gap: 6, paddingHorizontal: 17, paddingVertical: 1 }, compactAttachment: { width: 194, height: 46, flexDirection: 'row', alignItems: 'center', gap: 7, paddingHorizontal: 7, borderRadius: 16, backgroundColor: '#f0f5ee', borderWidth: 1, borderColor: '#adc4aa' }, compactAttachmentImage: { width: 27, height: 34, borderRadius: 8, backgroundColor: '#f5f7f3' }, compactAttachmentIcon: { width: 28, height: 28, alignItems: 'center', justifyContent: 'center', borderRadius: 9, backgroundColor: '#e1ecde' }, compactAttachmentCopy: { flex: 1, minWidth: 0 }, compactAttachmentLabel: { color: '#35483a', fontSize: 10, fontWeight: '700' }, compactAttachmentSummary: { color: '#6f7f71', fontSize: 8.5, lineHeight: 10, marginTop: 1 }, compactShelfImages: { flexDirection: 'row', gap: 2 }, compactRemove: { width: 21, height: 21, alignItems: 'center', justifyContent: 'center', borderRadius: 11, backgroundColor: '#e3ede0' }, selectionThumbnail: { width: 35, height: 42, borderRadius: 10, backgroundColor: '#f5f7f3' }, previewImage: { width: 44, height: 48, borderRadius: 10, backgroundColor: '#f5f7f3' }, previewImageCompact: { width: 29, height: 33, borderRadius: 8 }, previewImagePlaceholder: { alignItems: 'center', justifyContent: 'center' },
   routinePreviewBody: { paddingHorizontal: 2 }, routinePreviewRow: { minHeight: 25, flexDirection: 'row', alignItems: 'center', gap: 7 }, periodBadge: { width: 22, height: 22, alignItems: 'center', justifyContent: 'center', borderRadius: 11 }, amBadge: { backgroundColor: '#f7f1e3' }, pmBadge: { backgroundColor: '#edf0f7' }, periodPreviewLabel: { width: 49, color: '#506052', fontSize: 10, fontWeight: '700' }, periodPreviewSteps: { flex: 1, color: '#7d897f', fontSize: 9.5 }, routinePreviewDivider: { height: StyleSheet.hairlineWidth, marginLeft: 29, backgroundColor: '#edf0eb' },
   shelfPreviewBody: { gap: 5 }, shelfPreviewItems: { minHeight: 48, flexDirection: 'row', alignItems: 'center', gap: 6 }, shelfPreviewItem: { width: 48, alignItems: 'center', gap: 3 }, shelfPreviewName: { width: 48, color: '#768278', textAlign: 'center', fontSize: 8, fontWeight: '500' }, shelfMore: { width: 30, height: 30, alignItems: 'center', justifyContent: 'center', borderRadius: 15, backgroundColor: '#edf3eb' }, shelfMoreText: { color: '#56705a', fontSize: 10, fontWeight: '700' }, profilePreviewBody: { gap: 7 }, previewTagRow: { flexDirection: 'row', gap: 5 }, previewTag: { maxWidth: 110, color: '#5c725e', backgroundColor: '#eef4ec', paddingHorizontal: 8, paddingVertical: 4, borderRadius: 9, overflow: 'hidden', fontSize: 8.5, fontWeight: '600', textTransform: 'capitalize' }, photoPreviewBody: { flexDirection: 'row', alignItems: 'center', gap: 10 }, checkPreviewBody: { flexDirection: 'row', alignItems: 'center', gap: 13, paddingHorizontal: 4 }, checkDateColumn: { flex: 1, minWidth: 0 }, checkDateLabel: { color: '#869387', fontSize: 8, letterSpacing: 0.7, fontWeight: '700' },
-  composerDock: { backgroundColor: '#f5f5f2' }, composerWrap: { minHeight: 55, flexDirection: 'row', alignItems: 'center', gap: 8, marginHorizontal: 17, padding: 5, borderRadius: 17, backgroundColor: '#fff', borderWidth: 1, borderColor: '#e3e9e1' }, attachButton: { width: 39, height: 41, borderRadius: 13, alignItems: 'center', justifyContent: 'center', backgroundColor: '#edf3eb' }, composerInput: { flex: 1, maxHeight: 88, paddingTop: 10, paddingBottom: 8, color: '#35463a', fontSize: 13 }, sendButton: { width: 39, height: 41, alignItems: 'center', justifyContent: 'center', borderRadius: 13, backgroundColor: '#31543b' }, sendDisabled: { backgroundColor: '#aab9aa' }, privacyNote: { color: '#8a968b', textAlign: 'center', fontSize: 9, marginTop: 6, marginBottom: 2 },
+  composerDock: { backgroundColor: '#f5f5f2' }, modelStatus: { marginHorizontal: 20, marginBottom: 7 }, modelStatusText: { color: '#758477', fontSize: 9, lineHeight: 13 }, modelProgressTrack: { height: 3, backgroundColor: '#e1e8df', borderRadius: 2, overflow: 'hidden', marginTop: 4 }, modelProgressFill: { height: '100%', backgroundColor: '#64866a' }, modelDiagnostic: { color: '#92594f', fontSize: 9, lineHeight: 13, marginTop: 3 }, composerWrap: { minHeight: 55, flexDirection: 'row', alignItems: 'center', gap: 8, marginHorizontal: 17, padding: 5, borderRadius: 17, backgroundColor: '#fff', borderWidth: 1, borderColor: '#e3e9e1' }, attachButton: { width: 39, height: 41, borderRadius: 13, alignItems: 'center', justifyContent: 'center', backgroundColor: '#edf3eb' }, composerInput: { flex: 1, maxHeight: 88, paddingTop: 10, paddingBottom: 8, color: '#35463a', fontSize: 13 }, sendButton: { width: 39, height: 41, alignItems: 'center', justifyContent: 'center', borderRadius: 13, backgroundColor: '#31543b' }, sendDisabled: { backgroundColor: '#aab9aa' }, diagnosticsToggle: { alignSelf: 'center', paddingHorizontal: 14, paddingVertical: 2 }, privacyNote: { color: '#8a968b', textAlign: 'center', fontSize: 9, marginTop: 5, marginBottom: 2 }, diagnosticsPanel: { marginHorizontal: 18, marginBottom: 5, paddingHorizontal: 10, paddingVertical: 7, borderRadius: 10, backgroundColor: '#ecefe9' }, diagnosticsText: { color: '#748075', fontSize: 8, lineHeight: 12 },
   modalRoot: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 20 }, scrim: { ...StyleSheet.absoluteFill, backgroundColor: 'rgba(22,37,26,0.38)' }, scrimPressable: { ...StyleSheet.absoluteFill }, sheet: { width: '100%', maxWidth: 390, maxHeight: '88%', paddingHorizontal: 19, paddingTop: 16, paddingBottom: 12, borderRadius: 25, backgroundColor: '#fff', borderWidth: 1, borderColor: '#e4ebe1', shadowColor: '#1c3324', shadowOffset: { width: 0, height: 12 }, shadowOpacity: 0.18, shadowRadius: 24, elevation: 15 }, sheetHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 12 }, sheetTitle: { color: '#263a2c', fontSize: 19, lineHeight: 24, fontWeight: '700', letterSpacing: -0.35 }, closeButton: { width: 34, height: 34, borderRadius: 12, alignItems: 'center', justifyContent: 'center', backgroundColor: '#f2f5f0' }, sheetCopy: { color: '#7d897e', fontSize: 11.5, lineHeight: 16, marginTop: 3 },
   pickerBody: { position: 'relative' }, contextList: { flexShrink: 1, maxHeight: 510, marginTop: 12 }, productResultsOverlay: { position: 'absolute', top: 12, left: 0, right: 0, zIndex: 20, maxHeight: 250, overflow: 'hidden', borderRadius: 17, backgroundColor: '#fff', borderWidth: 1, borderColor: '#e3eae1', shadowColor: '#193220', shadowOffset: { width: 0, height: 8 }, shadowOpacity: 0.15, shadowRadius: 14, elevation: 14 }, productResultsList: { maxHeight: 250, paddingHorizontal: 9 },
   contextGrid: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'space-between', rowGap: 10, paddingBottom: 2 },

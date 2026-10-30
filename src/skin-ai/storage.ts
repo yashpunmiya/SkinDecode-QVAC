@@ -57,6 +57,22 @@ export async function clearSkinAIHistory(userId: string) {
   await db.runAsync('DELETE FROM skin_ai_context_cache WHERE user_id=?', userId);
 }
 
+/** Generic account-scoped local cache for derived intelligence. Values never sync to Supabase. */
+export async function getSkinAIValue<T>(userId: string, key: string): Promise<{ value: T; cachedAt: number } | null> {
+  const db = await database();
+  const row = await db.getFirstAsync<{ value_json: string; cached_at: number }>(
+    'SELECT value_json,cached_at FROM skin_ai_context_cache WHERE user_id=? AND cache_key=?', userId, key,
+  );
+  if (!row) return null;
+  try { return { value: JSON.parse(row.value_json) as T, cachedAt: row.cached_at }; } catch { return null; }
+}
+
+export async function putSkinAIValue(userId: string, key: string, value: unknown) {
+  const db = await database();
+  await db.runAsync('INSERT OR REPLACE INTO skin_ai_context_cache(user_id,cache_key,value_json,cached_at) VALUES(?,?,?,?)',
+    userId, key, JSON.stringify(value), Date.now());
+}
+
 export async function getCachedSkinAIContext(userId: string, key: string, maxAgeMs = 60_000): Promise<SkinAIContextAttachment | null> {
   const db = await database();
   const row = await db.getFirstAsync<{ value_json: string; cached_at: number }>(

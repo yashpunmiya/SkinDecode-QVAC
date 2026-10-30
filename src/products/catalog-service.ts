@@ -8,7 +8,7 @@ import type {
 import type { RoutineStep } from '../routine/models';
 import {
   cacheIngredientDetail, cacheLegacyProductDetail, cacheProductDetail, cacheProductSearch, cacheProducts, cacheShelfItems,
-  getCachedIngredientDetail, getCachedLegacyProductDetail, getCachedProduct, getCachedProductDetailsByIds, getCachedProductSearch,
+  cacheSkinProfile, getCachedIngredientDetail, getCachedLegacyProductDetail, getCachedProduct, getCachedProductDetailsByIds, getCachedProductSearch, getCachedSkinProfile,
   getCachedProducts, getCachedProductsByIds, getCachedShelfItems,
 } from './product-cache';
 import { decodeCompactFormula } from './compact-formula';
@@ -488,11 +488,20 @@ export async function getSkinProfile(userId: string): Promise<UserProfileRow | n
   const version = profileCacheVersion.get(userId) || 0;
   let request: Promise<UserProfileRow | null>;
   request = (async () => {
-    const { data, error } = await supabase.from('user_profiles')
-      .select('id,age_range,skin_type,sensitivity,skin_concerns,skin_goals,preferences,onboarding_completed,created_at,updated_at')
-      .eq('id', userId).maybeSingle();
-    if (error) throw error;
-    const value = data as UserProfileRow | null;
+    const cachedDisk = await getCachedSkinProfile(userId).catch(() => null);
+    let value: UserProfileRow | null;
+    try {
+      const { data, error } = await supabase.from('user_profiles')
+        .select('id,age_range,skin_type,sensitivity,skin_concerns,skin_goals,preferences,onboarding_completed,created_at,updated_at')
+        .eq('id', userId).maybeSingle();
+      if (error) throw error;
+      value = data as UserProfileRow | null;
+      if (value) await cacheSkinProfile(userId, value).catch((cacheError) => console.warn('[catalog] skin profile cache write failed', cacheError));
+    } catch (error) {
+      if (!isNetworkFailure(error) || !cachedDisk) throw error;
+      logCatalogFailure('skin profile network; using local cache', error);
+      value = cachedDisk;
+    }
     if ((profileCacheVersion.get(userId) || 0) === version) profileCache.set(userId, { value, expiresAt: Date.now() + 5 * 60 * 1000 });
     return value;
   })().finally(() => { if (profileRequests.get(userId) === request) profileRequests.delete(userId); });

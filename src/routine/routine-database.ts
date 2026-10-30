@@ -151,6 +151,20 @@ export async function getRoutineSnapshot(userId: string, includeDeleted = false)
   return { routines: routineRows.map(mapRoutine), steps: stepRows.map(mapStep), logs: logRows.map(mapLog) };
 }
 
+/** Local-only bounded snapshot for personal AI context; no sync service is called. */
+export async function getRoutineSnapshotForRange(userId: string, fromDate: string, throughDate: string): Promise<RoutineSnapshot> {
+  const database = await openRoutineDatabase();
+  const [routineRows, stepRows, logRows] = await Promise.all([
+    database.getAllAsync<RoutineRow>('SELECT * FROM routines WHERE user_id=? AND deleted_at IS NULL ORDER BY created_at', userId),
+    database.getAllAsync<StepRow>('SELECT * FROM routine_steps WHERE user_id=? AND deleted_at IS NULL ORDER BY position', userId),
+    database.getAllAsync<LogRow>(
+      'SELECT * FROM routine_logs WHERE user_id=? AND deleted_at IS NULL AND log_date>=? AND log_date<=? ORDER BY log_date DESC',
+      userId, fromDate, throughDate,
+    ),
+  ]);
+  return { routines: routineRows.map(mapRoutine), steps: stepRows.map(mapStep), logs: logRows.map(mapLog) };
+}
+
 export async function getPendingRoutineRows(userId: string): Promise<RoutineSnapshot> {
   const database = await openRoutineDatabase();
   const [routines, steps, logs] = await Promise.all([

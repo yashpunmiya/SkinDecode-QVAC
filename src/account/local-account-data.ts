@@ -5,7 +5,7 @@ import { deleteUserReminderData } from '../reminders/reminder-storage';
 import { cancelAllSkinDecodeReminders } from '../reminders/reminder-service';
 import { deleteUserWaterData } from '../water/water-tracker';
 import { clearSkinAIHistory } from '../skin-ai/storage';
-import { deleteUserShelfCache } from '../products/product-cache';
+import { deleteUserCatalogProfileCache, deleteUserShelfCache } from '../products/product-cache';
 import { invalidateSkinProfileCache } from '../products/catalog-service';
 import { deviceAlarm } from '../../modules/skindecode-alarm/src';
 
@@ -18,6 +18,7 @@ export async function clearLocalAccountData(userId: string) {
     deleteUserWaterData(userId),
     clearSkinAIHistory(userId),
     deleteUserShelfCache(userId),
+    deleteUserCatalogProfileCache(userId),
     cancelAllSkinDecodeReminders(),
     deviceAlarm.clearUserData(userId),
   ]);
