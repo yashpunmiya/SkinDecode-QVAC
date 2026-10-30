@@ -1,25 +1,80 @@
 # SkinDecode
 
-SkinDecode is a mobile skincare companion for keeping a skin profile, daily check-ins, photos, water logs, product shelf, and AM/PM routines together. Skin AI adds private, on-device conversation about the user's records and selected products.
+**Your skincare profile, routine, products, and daily skin notes in one place—with Skin AI running on your phone.**
 
-## Set up the app
+## Download for Android
 
-1. Install the pinned dependencies with `npm install`.
-2. Create `.env` with `EXPO_PUBLIC_SUPABASE_URL`, `EXPO_PUBLIC_SUPABASE_ANON_KEY`, and `EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID`. Use the Google OAuth client ID for a Web application; never add a Google client secret or Supabase service-role key to the app.
-3. Configure Google sign-in in Google Cloud and Supabase Auth. Create an Android OAuth client for `com.skindecode.app` and register the signing certificate fingerprint used by the build. iOS builds also need an iOS OAuth client and `EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID`.
-4. Apply pending database migrations with the Supabase project before signing in. The onboarding flow saves the completed profile to the signed-in user's `public.user_profiles` row; row-level security restricts access to that user.
-5. Rebuild native code after changing native dependencies or app configuration.
+[**Download the SkinDecode Android APK**](https://github.com/yashpunmiya/SkinDecode-QVAC/releases/latest/download/app-release.apk) · [View release details](https://github.com/yashpunmiya/SkinDecode-QVAC/releases/latest)
 
-For local Android development, run `npm run prebuild:android` and then `npm run android`. The Android command needs a connected device or configured emulator. On Windows the helper in `scripts/run-android.js` uses a short project path for Gradle to avoid path-length failures. Run `npm run typecheck` and the relevant `npm run test:*` scripts for code checks.
+The APK installs on Android 10 (API 29) and newer. On first use, Skin AI needs internet access to download its on-device model (about 737 MiB). After the model is downloaded, text generation runs on the phone.
+
+## What you can do
+
+- Build a skin profile with your skin type, sensitivity, concerns, goals, and preferences.
+- Keep AM and PM routines, product shelf items, daily skin check-ins, photos, and water logs together.
+- Browse products and review available formula ingredients and Skin Match signals.
+- Use Skin Intelligence to review recorded trends, routine signals, and proposed routine changes.
+- Ask Skin AI questions about your selected profile, routine, check-ins, water records, and product data.
 
 ## Skin AI and QVAC
 
-Skin AI uses the existing chat screen and account-scoped SQLite history. The QVAC provider runs the Llama 3.2 1B Instruct Q4_0 text model on the device; it does not call a hosted AI API. The first model download needs a network connection. After weights are downloaded, text inference runs locally.
+Skin AI uses QVAC for local text inference with **Llama 3.2 1B Instruct Q4_0**. The app does not send chat prompts to a hosted AI model. Chat history is stored in account-scoped SQLite, and relevant personal records are read from local app databases and caches.
 
-Before a response, Skin AI combines the message, selected attachments, recent conversation turns, and relevant personal records. It reads skin profile, check-in, routine, water, shelf, and product/formula data from local caches first. If a needed profile or selected formula is not cached, the app's existing profile/catalog service may try its Supabase-backed source and save the result locally. Product search and account sync may require internet. Missing records are reported as unavailable rather than invented.
+When a needed profile or product formula is not cached, the existing profile/catalog service may retrieve it from Supabase while online and cache it for later. Sign-in, account sync, product search, and first-time model download can require internet. QVAC is text-only; attaching a photo does not trigger AI photo analysis.
 
-Context is fitted to the model's 2,048-token window. Relevant facts are kept first and a diagnostic is logged if less relevant notes or older conversation turns must be omitted. Product formula facts and Skin Match scores come from the app's product data and local scorer; the model explains that evidence in its own words. The app does not treat a text model as photo analysis.
+See [the Skin AI and QVAC guide](docs/SKIN_AI_QVAC.md) for architecture, model details, offline behavior, and limitations.
 
-The product includes Skin Intelligence: recorded-data trends, routine checks, hypothetical routine changes, and optional weekly explanations written by QVAC. The app calculates its recorded metrics locally; QVAC explains the supplied results.
+## Run the app locally
 
-See [Skin AI and QVAC](docs/SKIN_AI_QVAC.md) for the architecture, model details, offline setup, and known limits.
+### Requirements
+
+- Node.js and npm
+- Android Studio with an Android SDK and an Android 10+ device or emulator
+- A Supabase project configured for the app's auth and data services
+- Google OAuth client IDs for the platforms you plan to run
+
+### Configure
+
+Create a local `.env` file with:
+
+```dotenv
+EXPO_PUBLIC_SUPABASE_URL=...
+EXPO_PUBLIC_SUPABASE_ANON_KEY=...
+EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID=...
+```
+
+For iOS, also set `EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID`. These are app client values; do not put Google client secrets or a Supabase service-role key in the app.
+
+Configure Google sign-in in Google Cloud and Supabase Auth. For Android, register an OAuth client for `com.skindecode.app` and the signing certificate SHA-1 used for your build. Apply pending Supabase migrations before signing in; `public.user_profiles` uses row-level security to scope profile data to the signed-in user.
+
+### Build Android
+
+```sh
+npm install
+npm run prebuild:android
+npm run android
+```
+
+On Windows, `scripts/run-android.js` creates a short project-path junction for Gradle to avoid path-length errors. `npm run android` installs and launches the development build, so connect a phone with USB debugging or start an emulator first.
+
+## Checks
+
+```sh
+npm run typecheck
+npm run test:skin-ai
+npm run test:skin-intelligence
+npm run test:daily-skin-check
+npm run test:routine
+npm run test:intelligence
+npm run test:intelligence:calibration
+npm run test:reminders
+npm run test:water
+```
+
+## Project stack
+
+- Expo, React Native, TypeScript, and Expo Router
+- Supabase Auth and app data services
+- SQLite-backed local records and chat history
+- QVAC Expo SDK **0.22.0** for on-device inference
+- Android minimum SDK **29**
